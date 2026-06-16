@@ -1,0 +1,67 @@
+# Security Posture — Cross-Skill Suppressions
+#
+# Applies AFTER subskill outputs are merged + dedup'd. Distinct from each
+# subskill's local SUPPRESSIONS.md — this file handles cross-skill duplicates
+# the subskills can't see (e.g., a finding both `security-backend` and
+# `security-gcp` flag from different angles that's actually intentional at
+# the architecture level).
+#
+# Format: standard YAML list of suppression objects.
+#
+# Required fields per entry:
+#   - id              kebab-case stable identifier
+#   - pattern         match criteria (cwe + sources + optional resource)
+#   - reason          why intentional (link to memory / ADR / vendor docs)
+#   - expires         YYYY-MM-DD (mandatory — ≤6 months project-specific,
+#                     ≤12 months vendor-driven)
+#   - source          where this decision is documented
+
+# ---------------------------------------------------------------------------
+# Active suppressions
+# ---------------------------------------------------------------------------
+
+suppressions:
+  - id: cross-skill-api-public-by-design
+    pattern:
+      cwe: [CWE-284, CWE-862]
+      sources_must_include: [security-gcp]
+      resource_glob: "projects/*/services/<api-service>*"
+    reason: |
+      The public API service is the public FastAPI surface; bearer auth at
+      the app layer (backend/api/auth.py) is the security boundary, NOT Cloud
+      Run IAM. Cross-skill suppression: security-gcp flags allUsers=invoker
+      on this service, security-backend confirms the bearer auth is in
+      place. Both true; collapse them.
+    expires: 2026-11-23
+    source: backend/api/utils/router.py
+
+# ---------------------------------------------------------------------------
+# Findings explicitly NOT suppressed (surfaced every run)
+# ---------------------------------------------------------------------------
+# Documented here so it's clear these are intentionally visible:
+#
+#   - firestore-subscriptionactive-privesc (CWE-285)
+#     Dedup'd across security-backend + security-gcp; recurs until
+#     backend/firestore.rules is amended.
+#
+#   - stripe-webhook-stub (CWE-345)
+#   - nextconfig-no-security-headers (CWE-1021)
+#   - caret-pin-on-firebase-* (CWE-1104)
+#
+# Each of these typically has an OPEN ticket. The orchestrator's job is to
+# keep them visible (with PERSISTENT status + days_open) until the ticket
+# closes.
+
+# ---------------------------------------------------------------------------
+# Schema notes
+# ---------------------------------------------------------------------------
+# - `cwe` is a list — finding must match ANY listed CWE.
+# - `sources_must_include` is a list — finding's source subskills must
+#   include all listed entries (after dedup merge).
+# - `resource_glob` is an optional shell-glob pattern matched against the
+#   finding's primary resource cite.
+# - Match logic: finding matches if (cwe matches) AND (sources match) AND
+#   (resource_glob matches, if present).
+#
+# Empty `suppressions:` list is valid — orchestrator emits the "Suppressed
+# (0 cross-skill)" section so the user can see nothing is hidden.

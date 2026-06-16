@@ -1,0 +1,10 @@
+{
+  "name": "weave-dashboard",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "start": "bun --hot server.ts",
+    "build:graphs": "bun lib/graphs/build-all.ts"
+  }
+}

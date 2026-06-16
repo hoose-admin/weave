@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8" />
+        <title>weave graphs</title>
+        <!-- FOUC-prevention: see index.html for the rationale. Same
+             snippet kept in sync across all three pages. -->
+        <script>
+            (function () {
+                try {
+                    var saved = localStorage.getItem("weave-theme");
+                    if (saved === "dark" || saved === "light") {
+                        document.documentElement.dataset.theme = saved;
+                        return;
+                    }
+                } catch (e) {}
+                if (
+                    window.matchMedia &&
+                    window.matchMedia("(prefers-color-scheme: dark)").matches
+                ) {
+                    document.documentElement.dataset.theme = "dark";
+                }
+            })();
+        </script>
+        <link rel="stylesheet" href="/styles.css" />
+        <script src="/vendor/cytoscape.min.js"></script>
+        <script src="/vendor/dagre.min.js"></script>
+        <script src="/vendor/cytoscape-dagre.min.js"></script>
+    </head>
+    <body class="graphs-page">
+        <!-- weave:navbar active="graphs" -->
+        <div class="subnav" id="subnav">
+            <a href="/graphs/repo-map" data-kind="repo-map">repo-map</a>
+            <a href="/graphs/tickets" data-kind="tickets">tickets</a>
+            <a href="/graphs/skills" data-kind="skills">skills</a>
+            <a href="/graphs/ai" data-kind="ai">ai</a>
+        </div>
+        <div class="graph-title" id="graph-title">
+            <span class="graph-title-name" id="graph-title-name"></span>
+            <span class="graph-title-sub" id="graph-title-sub"></span>
+        </div>
+        <div class="toolbar">
+            <label>layout</label>
+            <select id="layout">
+                <option value="dagre">dagre</option>
+                <option value="cose">cose</option>
+                <option value="breadthfirst">breadthfirst</option>
+                <option value="circle">circle</option>
+                <option value="grid">grid</option>
+            </select>
+            <input
+                id="filter"
+                type="search"
+                placeholder="filter by name…"
+                autocomplete="off"
+            />
+            <label id="edge-mode-label" hidden>edges
+                <select id="edge-mode">
+                    <option value="all">all</option>
+                    <option value="parent">parent only (tree)</option>
+                </select>
+            </label>
+            <button id="rebuild">rebuild</button>
+            <button id="reset-layout" title="clear saved node positions and re-run the auto-layout">reset layout</button>
+        </div>
+        <div class="graph-stats" id="info"></div>
+        <div id="cy"></div>
+        <details class="legend" id="legend-repo-map" hidden>
+            <summary>key / legend</summary>
+            <h4>nodes</h4>
+            <ul>
+                <li><span class="sw orchestrator"></span>directory</li>
+                <li><span class="sw generator"></span>file <small>coloured by language (ts · js · py · go · rs …)</small></li>
+                <li>★ entry point <small>index / main / mod</small></li>
+            </ul>
+            <h4>edges</h4>
+            <ul>
+                <li><span class="ln related"></span>contains <small>directory → child</small></li>
+                <li><span class="ln depends-on"></span>imports <small>file → file (relative import)</small></li>
+            </ul>
+            <p class="hint">
+                best-effort structure from a filesystem walk · the <code>repo-map</code> skill writes a richer map · click a node to focus its lineage
+            </p>
+        </details>
+        <details class="legend" id="legend-skills" hidden>
+            <summary>key / legend</summary>
+            <h4>nodes</h4>
+            <ul>
+                <li><span class="sw orchestrator"></span>orchestrator <small>routes intent</small></li>
+                <li><span class="sw audit"></span>audit <small>read-only inspection</small></li>
+                <li><span class="sw action"></span>action <small>mutates state</small></li>
+                <li><span class="sw generator"></span>generator <small>produces artifact</small></li>
+                <li><span class="sw utility"></span>utility</li>
+                <li><span class="sw specialized"></span>specialized</li>
+                <li><span class="sw workflow"></span>workflow <small>procedural multi-step skill</small></li>
+                <li><span class="sw leaf"></span>leaf</li>
+                <li><span class="sw orphan"></span>orphan <small>no connects_to in/out</small></li>
+            </ul>
+            <h4>edges</h4>
+            <ul>
+                <li><span class="ln edge-parent"></span><strong>parent</strong> <small>canonical entry → child (the tree)</small></li>
+                <li><span class="ln edge-handoff"></span><strong>handoff</strong> <small>invokes/recommends, but doesn't own (cross-cluster, shared primitives)</small></li>
+            </ul>
+            <p class="hint">
+                use the <em>edges</em> dropdown above to filter to parent-only (tree view) · click a node to focus its lineage · click background to clear · convention: <code>.claude/skills/skill-builder/references/CONNECTS_TO_CONVENTION.md</code>
+            </p>
+        </details>
+        <details class="legend" id="legend-tickets" hidden>
+            <summary>key / legend</summary>
+            <h4>edges</h4>
+            <ul>
+                <li><span class="ln depends-on"></span>depends_on</li>
+                <li><span class="ln blocks"></span>blocks</li>
+                <li><span class="ln related"></span>related</li>
+            </ul>
+            <p class="hint">click a node to open the ticket</p>
+        </details>
+        <details class="legend" id="legend-ai" hidden>
+            <summary>key / legend</summary>
+            <h4>node clusters</h4>
+            <ul>
+                <li><span class="sw ai-skill"></span>skill <small>SKILL.md</small></li>
+                <li><span class="sw ai-agent"></span>agent <small>built-in dashed; user/project solid</small></li>
+                <li><span class="sw ai-command"></span>slash-command <small>legacy commands/ dir</small></li>
+                <li><span class="sw ai-hook"></span>hook ◆ <small>event nodes dotted ring</small></li>
+                <li><span class="sw ai-mcp"></span>mcp-server ⌬ <small>tool ○ · prompt △ · resource ◇</small></li>
+                <li><span class="sw ai-style"></span>output-style <small>built-in dashed</small></li>
+                <li><span class="sw ai-plugin"></span>plugin / marketplace</li>
+                <li><span class="sw ai-settings"></span>settings-file / CLAUDE.md</small></li>
+                <li><span class="sw ai-misc"></span>status-line / lsp-server</li>
+                <li><span class="sw ai-tool"></span>tool <small>built-in or MCP-exposed</small></li>
+            </ul>
+            <h4>edges</h4>
+            <ul>
+                <li><span class="ln ai-gates"></span><strong>gates</strong> <small>hook → tool (Pre/PostToolUse matcher)</small></li>
+                <li><span class="ln ai-scopes"></span><strong>scopes</strong> <small>agent → tool (tools/disallowedTools)</small></li>
+                <li><span class="ln ai-invokes"></span><strong>invokes</strong> <small>agent → skill/mcp; hook → agent/mcp-tool</small></li>
+                <li><span class="ln ai-provides"></span><strong>provides</strong> <small>mcp-server → tool/prompt/resource</small></li>
+                <li><span class="ln ai-bundles"></span><strong>bundles</strong> <small>plugin → its components</small></li>
+                <li><span class="ln ai-lists"></span><strong>lists</strong> <small>marketplace → plugin</small></li>
+                <li><span class="ln ai-configures"></span><strong>configures</strong> <small>settings → hook/mcp/style</small></li>
+                <li><span class="ln ai-overrides"></span><strong>overrides</strong> <small>settings precedence chain</small></li>
+            </ul>
+            <p class="hint">
+                type <code>hook</code>, <code>mcp</code>, <code>skill</code>, <code>agent</code>, etc. in the filter to isolate one cluster · click a node to focus its lineage · ADR-004
+            </p>
+        </details>
+        <!-- weave:howto-modal -->
+
+        <script type="module" src="/graphs.js"></script>
+        <script type="module" src="/navbar-search.js"></script>
+        <script type="module" src="/theme.js"></script>
+        <script type="module" src="/howto.js"></script>
+    </body>
+</html>

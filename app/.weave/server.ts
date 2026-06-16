@@ -1,0 +1,672 @@
+import { join } from "node:path";
+import { readFile, stat, readdir } from "node:fs/promises";
+import { PORT, REPO_ROOT } from "./weave.config.ts";
+import { BUCKETS, listAll, listBucket, readTicket, writeTicket, moveTicket, createTicket, deleteTicket, findTicket, archiveStaleComplete, type Bucket } from "./lib/tickets.ts";
+import { buildTicketGraph } from "./lib/graphs/tickets.ts";
+import { buildRepoMapGraph } from "./lib/graphs/repo-map.ts";
+import { buildSkillGraph, skillSourceMtimes } from "./lib/graphs/skills.ts";
+import { buildAiGraph, aiSourceMtimes } from "./lib/graphs/ai.ts";
+import {
+  ADR_STATES,
+  ADRS_ROOT,
+  listAll as listAllAdrs,
+  readAdr,
+  writeAdr,
+  deleteAdr,
+  transitionAdr,
+  promoteDraftTickets,
+  mirrorSupersedes,
+  validateAdr,
+  nextAdrId,
+  listVersions,
+  readVersionSnapshot,
+  readComments,
+  appendComment,
+  listReferences,
+  readReference,
+  writeReference,
+  type AdrState,
+  type ParsedAdr,
+} from "./lib/adrs.ts";
+
+type GraphKind = "tickets" | "repo-map" | "skills" | "adrs" | "ai";
+
+const ROOT = import.meta.dir;
+const PUBLIC = join(ROOT, "public");
+const CACHE = join(ROOT, "cache");
+
+const MIME: Record<string, string> = {
+  ".html": "text/html; charset=utf-8",
+  ".js":   "application/javascript; charset=utf-8",
+  ".css":  "text/css; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".svg":  "image/svg+xml",
+  ".ico":  "image/x-icon",
+  ".png":  "image/png",
+};
+
+const json = (data: unknown, status = 200) =>
+  new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json" } });
+
+const err = (msg: string, status = 400) => json({ error: msg }, status);
+
+const NAV_ITEMS: ReadonlyArray<{ key: string; href: string; label: string }> = [
+  { key: "board",   href: "/",                 label: "board"  },
+  { key: "graphs",  href: "/graphs/repo-map",  label: "graphs" },
+  { key: "adrs",    href: "/adrs",             label: "adrs"   },
+];
+
+function renderNavLinks(active: string): string {
+  return NAV_ITEMS
+    .map(({ key, href, label }) => {
+      const cls = key === active ? ' class="active"' : "";
+      return `<a href="${href}"${cls}>${label}</a>`;
+    })
+    .join("\n                ");
+}
+
+// Single source of truth for the dashboard's top navbar. Emits the entire
+// `<header class="top">` block — nav links + search + theme toggle + help
+// button — so every view renders an identical bar. `withStatus` adds the
+// ticket-only save-status slot (#status, read by ticket-edit.js).
+function renderNavbar(active: string, withStatus: boolean): string {
+  const statusSlot = withStatus
+    ? `<span id="status" class="status"></span>\n                `
+    : "";
+  return `<header class="top">
+            <nav>
+                ${renderNavLinks(active)}
+            </nav>
+            <div class="top-actions">
+                ${statusSlot}<div class="navbar-search-wrap">
+                    <input
+                        type="search"
+                        id="navbar-search"
+                        placeholder="search tickets — id or title"
+                        autocomplete="off"
+                        spellcheck="false"
+                    />
+                </div>
+                <button
+                    id="theme-toggle"
+                    class="how-to-btn theme-toggle-btn"
+                    type="button"
+                    aria-label="Toggle theme"
+                    title="Toggle theme"
+                >
+                    ☾
+                </button>
+                <button
+                    id="howto-btn"
+                    class="how-to-btn"
+                    type="button"
+                    title="How to use this dashboard"
+                >
+                    ?
+                </button>
+            </div>
+        </header>`;
+}
+
+// Full-navbar marker. Optional `status` token adds the ticket save-status slot.
+const NAVBAR_MARKER_RE = /<!--\s*weave:navbar(?:\s+active="([\w-]*)")?(?:\s+(status))?\s*-->/g;
+// How-to modal marker — replaced with the shared howto-modal.html partial.
+const HOWTO_MARKER_RE = /<!--\s*weave:howto-modal\s*-->/g;
+const HOWTO_PARTIAL = join(PUBLIC, "howto-modal.html");
+
+async function renderHowtoModal(): Promise<string> {
+  try {
+    return (await readFile(HOWTO_PARTIAL)).toString("utf8");
+  } catch {
+    return "";
+  }
+}
+
+async function serveStatic(path: string): Promise<Response> {
+  const full = join(PUBLIC, path);
+  if (!full.startsWith(PUBLIC)) return new Response("forbidden", { status: 403 });
+  try {
+    const buf = await readFile(full);
+    const ext = "." + (path.split(".").pop() ?? "");
+    if (ext === ".html") {
+      let html = buf.toString("utf8");
+      html = html.replace(NAVBAR_MARKER_RE, (_m, active, status) =>
+        renderNavbar(active ?? "", status === "status"));
+      const modal = await renderHowtoModal();
+      html = html.replace(HOWTO_MARKER_RE, () => modal);
+      return new Response(html, { headers: { "content-type": MIME[ext], "cache-control": "no-store" } });
+    }
+    return new Response(buf, { headers: { "content-type": MIME[ext] ?? "application/octet-stream", "cache-control": "no-store" } });
+  } catch {
+    return new Response("not found", { status: 404 });
+  }
+}
+
+const PROJECT_ROOT = REPO_ROOT;
+
+const IGNORE_DIRS = new Set(["node_modules", "__pycache__", ".next", ".git", ".venv", "venv", "dist", "build"]);
+
+async function newestMtime(rootRel: string, predicate: (path: string) => boolean): Promise<number> {
+  const root = join(PROJECT_ROOT, rootRel);
+  let newest = 0;
+  const walk = async (dir: string) => {
+    let ents;
+    try {
+      ents = await readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of ents) {
+      const full = join(dir, e.name);
+      if (e.isDirectory()) {
+        if (IGNORE_DIRS.has(e.name)) continue;
+        await walk(full);
+      } else if (e.isFile() && predicate(full)) {
+        try {
+          const s = await stat(full);
+          if (s.mtimeMs > newest) newest = s.mtimeMs;
+        } catch {
+          // skip
+        }
+      }
+    }
+  };
+  await walk(root);
+  return newest;
+}
+
+async function newestSourceMtime(kind: GraphKind): Promise<number> {
+  if (kind === "tickets") {
+    return newestMtime(".tickets", (p) => /TKT-\d+.*\.md$/.test(p));
+  }
+  if (kind === "skills") {
+    return skillSourceMtimes();
+  }
+  if (kind === "ai") {
+    return aiSourceMtimes();
+  }
+  if (kind === "adrs") {
+    // ADR cache invalidates on ADR file edits OR ticket edits (implements_adr
+    // edges depend on ticket frontmatter).
+    const [adrMtime, ticketMtime] = await Promise.all([
+      newestMtime(".tickets/ADRs", (p) => /ADR-\d+.*\.md$/.test(p)),
+      newestMtime(".tickets", (p) => /TKT-\d+.*\.md$/.test(p)),
+    ]);
+    return Math.max(adrMtime, ticketMtime);
+  }
+  // repo-map: the cache is written by the repo-map skill (a rich introspection)
+  // or by the heuristic fallback builder. Treat a written cache as always fresh
+  // so the skill's richer output is never silently clobbered; `?rebuild=1`
+  // forces the heuristic rebuild on demand.
+  return 0;
+}
+
+async function readCachedOrBuild(kind: GraphKind, rebuild: boolean): Promise<unknown> {
+  const file = join(CACHE, `${kind}-graph.json`);
+  if (!rebuild) {
+    try {
+      const cacheStat = await stat(file);
+      const sourceMtime = await newestSourceMtime(kind);
+      if (sourceMtime <= cacheStat.mtimeMs) {
+        const raw = await readFile(file, "utf8");
+        return JSON.parse(raw);
+      }
+    } catch {
+      // fall through to build
+    }
+  }
+  const graph =
+    kind === "tickets" ? await buildTicketGraph()
+    : kind === "repo-map" ? await buildRepoMapGraph()
+    : kind === "skills" ? await buildSkillGraph()
+    : kind === "ai" ? await buildAiGraph()
+    : await (await import("./lib/graphs/adrs.ts")).buildAdrGraph();
+  const { writeFile, mkdir } = await import("node:fs/promises");
+  await mkdir(CACHE, { recursive: true });
+  await writeFile(file, JSON.stringify(graph, null, 2), "utf8");
+  return graph;
+}
+
+const server = Bun.serve({
+  port: PORT,
+  hostname: "127.0.0.1",
+  async fetch(req) {
+    const url = new URL(req.url);
+    const { pathname } = url;
+
+    // Routes
+    if (pathname === "/")                return serveStatic("index.html");
+    if (pathname === "/graphs")          return Response.redirect("/graphs/repo-map", 302);
+    if (/^\/graphs\/(tickets|repo-map|skills|ai)\/?$/.test(pathname)) return serveStatic("graphs.html");
+    if (pathname.startsWith("/ticket/")) return serveStatic("ticket.html");
+    if (pathname === "/adrs" || pathname === "/adrs/") return serveStatic("adrs.html");
+    if (pathname === "/palette" || pathname === "/palette/") return serveStatic("palette.html");
+    if (/^\/adrs\/ADR-\d+\/?$/.test(pathname)) return serveStatic("adr.html");
+
+    // API
+    if (pathname === "/api/buckets" && req.method === "GET") {
+      await archiveStaleComplete();
+      const visible = BUCKETS.filter((b) => b !== "7-archive");
+      const out: Record<string, unknown> = {};
+      for (const b of visible) out[b] = await listBucket(b);
+      return json(out);
+    }
+
+    if (pathname === "/api/buckets/7-archive" && req.method === "GET") {
+      return json(await listBucket("7-archive"));
+    }
+
+    if (pathname === "/api/domains" && req.method === "GET") {
+      const all = await listAll();
+      const set = new Set<string>(["app", "infra", "docs", "meta"]);
+      for (const t of all) if (t.domain) set.add(t.domain);
+      return json([...set].sort());
+    }
+
+    if (pathname === "/api/tickets" && req.method === "POST") {
+      let payload: Record<string, unknown>;
+      try {
+        payload = await req.json();
+      } catch {
+        return err("invalid JSON body");
+      }
+      const title = typeof payload.title === "string" ? payload.title.trim() : "";
+      if (!title) return err("title is required");
+      const priority = typeof payload.priority === "string" ? payload.priority : "Medium";
+      const domain = typeof payload.domain === "string" ? payload.domain : undefined;
+      const body = typeof payload.body === "string" ? payload.body : undefined;
+      const csv = (v: unknown): string[] | undefined =>
+        Array.isArray(v) ? v.map(String).map((s) => s.trim()).filter(Boolean)
+        : typeof v === "string" ? v.split(",").map((s) => s.trim()).filter(Boolean)
+        : undefined;
+      const bucket = typeof payload.bucket === "string" ? payload.bucket as Bucket : "scratch";
+      if (!BUCKETS.includes(bucket)) return err(`invalid bucket: ${bucket}`);
+      // complexity: optional int 1–5. Absent / "" / "auto" → don't set.
+      // Anything else that doesn't coerce to 1–5 is a hard 400.
+      let complexity: number | undefined;
+      const rawC = payload.complexity;
+      if (rawC !== undefined && rawC !== null && rawC !== "" && rawC !== "auto") {
+        const n = typeof rawC === "number" ? rawC : parseInt(String(rawC), 10);
+        if (!Number.isInteger(n) || n < 1 || n > 5) {
+          return err(`invalid complexity: ${rawC} (expected 1–5 or "auto")`);
+        }
+        complexity = n;
+      }
+      try {
+        const t = await createTicket({
+          title,
+          priority,
+          domain,
+          body,
+          tags: csv(payload.tags),
+          depends_on: csv(payload.depends_on),
+          blocks: csv(payload.blocks),
+          related: csv(payload.related),
+          bucket,
+          complexity,
+        });
+        return json(t, 201);
+      } catch (e) {
+        return err(e instanceof Error ? e.message : String(e), 500);
+      }
+    }
+
+    const idMatch = pathname.match(/^\/api\/tickets\/(TKT-\d+)$/);
+    if (idMatch) {
+      const id = idMatch[1];
+      try {
+        if (req.method === "GET") {
+          const t = await readTicket(id);
+          return t ? json(t) : err("not found", 404);
+        }
+        if (req.method === "PUT") {
+          const { frontmatter, body } = await req.json();
+          if (!frontmatter || typeof body !== "string") return err("expected {frontmatter, body}");
+          await writeTicket(id, frontmatter, body);
+          return json({ ok: true });
+        }
+        if (req.method === "DELETE") {
+          await deleteTicket(id);
+          return json({ ok: true });
+        }
+        return err("method not allowed", 405);
+      } catch (e) {
+        return err(e instanceof Error ? e.message : String(e), 500);
+      }
+    }
+
+    const moveMatch = pathname.match(/^\/api\/tickets\/(TKT-\d+)\/move$/);
+    if (moveMatch && req.method === "POST") {
+      const id = moveMatch[1];
+      const { to } = await req.json();
+      if (!BUCKETS.includes(to)) return err(`invalid bucket: ${to}`);
+      const result = await moveTicket(id, to as Bucket);
+      return json(result);
+    }
+
+    const graphMatch = pathname.match(/^\/api\/graphs\/(tickets|repo-map|skills|adrs|ai)$/);
+    if (graphMatch && req.method === "GET") {
+      const kind = graphMatch[1] as GraphKind;
+      const rebuild = url.searchParams.get("rebuild") === "1";
+      return json(await readCachedOrBuild(kind, rebuild));
+    }
+
+    // -----------------------------------------------------------------------
+    // ADR API — list/read/create/update + FSM-validated transitions.
+    // Spec source: .tickets/ADRs/ADR-001-meta-adr-system.md §D8.
+    // Backed by .weave/lib/adrs.ts (TKT-205).
+    // -----------------------------------------------------------------------
+
+    if (pathname === "/api/adrs" && req.method === "GET") {
+      return json(await listAllAdrs());
+    }
+
+    if (pathname === "/api/adrs" && req.method === "POST") {
+      let payload: Record<string, unknown>;
+      try {
+        payload = await req.json();
+      } catch {
+        return err("invalid JSON body");
+      }
+      const title = typeof payload.title === "string" ? payload.title.trim() : "";
+      if (!title) return err("title is required");
+      const csv = (v: unknown): string[] =>
+        Array.isArray(v) ? (v as unknown[]).map(String).map((s) => s.trim()).filter(Boolean)
+        : typeof v === "string" ? v.split(",").map((s) => s.trim()).filter(Boolean)
+        : [];
+      const deciders = csv(payload.deciders);
+      const tags = csv(payload.tags);
+      const relatedTickets = csv(payload.related_tickets);
+      const supersedes = csv(payload.supersedes);
+      const domain = typeof payload.domain === "string" ? payload.domain : "meta";
+      const bodyOverride = typeof payload.body === "string" && payload.body.trim() ? payload.body : null;
+      // complexity: optional int 1–5. Absent / "" / "auto" → undefined.
+      let complexity: number | undefined;
+      const rawC = payload.complexity;
+      if (rawC !== undefined && rawC !== null && rawC !== "" && rawC !== "auto") {
+        const n = typeof rawC === "number" ? rawC : parseInt(String(rawC), 10);
+        if (!Number.isInteger(n) || n < 1 || n > 5) {
+          return err(`invalid complexity: ${rawC} (expected 1–5 or "auto")`);
+        }
+        complexity = n;
+      }
+      try {
+        const newId = await nextAdrId();
+        const today = new Date().toISOString().slice(0, 10);
+        const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 60);
+        const baseName = `${newId}-${domain}-${slug || "untitled"}`;
+        const filename = `${baseName}.md`;
+        const { writeFile, mkdir, rm } = await import("node:fs/promises");
+        // Folder-per-ADR layout: ADRS_ROOT/<baseName>/<baseName>.md +
+        // versions/ + references/ + comments.jsonl.
+        const folder = join(ADRS_ROOT, baseName);
+        await mkdir(folder, { recursive: true });
+        await mkdir(join(folder, "versions"), { recursive: true });
+        await mkdir(join(folder, "references"), { recursive: true });
+        const body = bodyOverride ?? [
+          "### TL;DR",
+          "",
+          "<2-4 sentences capturing the decision and why it matters.>",
+          "",
+          "### Decision",
+          "",
+          "<The chosen path, stated explicitly.>",
+          "",
+          "### Consequences",
+          "",
+          "<What follows from the decision: tickets implied, conventions established, risks accepted.>",
+          "",
+          "### Alternatives considered",
+          "",
+          "<What was rejected and why.>",
+          "",
+        ].join("\n");
+        const parsed: ParsedAdr = {
+          frontmatter: {
+            id: newId,
+            title,
+            status: "proposed",
+            version: 1,
+            created: today,
+            decided: null,
+            deciders,
+            supersedes,
+            superseded_by: null,
+            related_tickets: relatedTickets,
+            proposed_tickets: [],
+            materialized_tickets: [],
+            tags,
+            domain,
+            ...(complexity !== undefined ? { complexity } : {}),
+          },
+          body,
+        };
+        const { serializeAdr } = await import("./lib/adrs.ts");
+        const canonical = join(folder, filename);
+        await writeFile(canonical, serializeAdr(parsed), "utf8");
+        // Touch the comments.jsonl so the file exists (empty).
+        await writeFile(join(folder, "comments.jsonl"), "", "utf8");
+        // Mirror supersedes: for each ADR in supersedes[], flip its status to
+        // "superseded" and set its superseded_by to the new ADR. Atomic per-file.
+        // On failure, roll back the new ADR folder so the system stays consistent.
+        if (supersedes.length > 0) {
+          try {
+            await mirrorSupersedes(newId, supersedes);
+          } catch (mirrorErr) {
+            await rm(folder, { recursive: true, force: true }).catch(() => {});
+            return err(`supersedes mirror failed: ${mirrorErr instanceof Error ? mirrorErr.message : String(mirrorErr)} — new ADR ${newId} rolled back`, 500);
+          }
+        }
+        return json({ id: newId, filename, folder: baseName, ...parsed }, 201);
+      } catch (e) {
+        return err(e instanceof Error ? e.message : String(e), 500);
+      }
+    }
+
+    const adrIdMatch = pathname.match(/^\/api\/adrs\/(ADR-\d+)$/);
+    if (adrIdMatch) {
+      const id = adrIdMatch[1];
+      try {
+        if (req.method === "GET") {
+          const a = await readAdr(id);
+          return a ? json(a) : err("not found", 404);
+        }
+        if (req.method === "PUT") {
+          const body = await req.json();
+          if (!body || typeof body !== "object") return err("expected {frontmatter, body}");
+          const fm = (body as { frontmatter?: unknown }).frontmatter;
+          const bodyStr = (body as { body?: unknown }).body;
+          if (!fm || typeof bodyStr !== "string") return err("expected {frontmatter, body}");
+          const fmRec = fm as Record<string, unknown>;
+          // Refuse id changes.
+          if (fmRec.id !== undefined && fmRec.id !== id) {
+            return json({ error: `cannot change id from ${id} to ${fmRec.id}` }, 409);
+          }
+          // Refuse edits from terminal status.
+          const existing = await readAdr(id);
+          if (!existing) return err("not found", 404);
+          const currentStatus = existing.frontmatter.status ?? "proposed";
+          const terminal = new Set(["rejected", "superseded", "deprecated"]);
+          if (terminal.has(currentStatus) && fmRec.status !== currentStatus) {
+            return json({ error: `cannot edit from terminal status "${currentStatus}" — use transition or create a superseding ADR` }, 409);
+          }
+          await writeAdr(id, { frontmatter: fmRec, body: bodyStr });
+          return json({ ok: true });
+        }
+        if (req.method === "DELETE") {
+          const result = await deleteAdr(id);
+          return json({ ok: true, ...result });
+        }
+        return err("method not allowed", 405);
+      } catch (e) {
+        return err(e instanceof Error ? e.message : String(e), 500);
+      }
+    }
+
+    // ── Versions / comments / references — folder-layout endpoints (TKT) ──
+
+    const adrVersionsMatch = pathname.match(/^\/api\/adrs\/(ADR-\d+)\/versions$/);
+    if (adrVersionsMatch && req.method === "GET") {
+      return json({ versions: await listVersions(adrVersionsMatch[1]) });
+    }
+
+    const adrVersionMatch = pathname.match(/^\/api\/adrs\/(ADR-\d+)\/versions\/(\d+)$/);
+    if (adrVersionMatch && req.method === "GET") {
+      const snap = await readVersionSnapshot(adrVersionMatch[1], parseInt(adrVersionMatch[2], 10));
+      if (!snap) return err("not found", 404);
+      return json(snap);
+    }
+
+    const adrCommentsMatch = pathname.match(/^\/api\/adrs\/(ADR-\d+)\/comments$/);
+    if (adrCommentsMatch) {
+      const id = adrCommentsMatch[1];
+      try {
+        if (req.method === "GET") {
+          return json({ comments: await readComments(id) });
+        }
+        if (req.method === "POST") {
+          const payload = await req.json();
+          const author = typeof payload.author === "string" ? payload.author.trim() : "";
+          const text = typeof payload.text === "string" ? payload.text.trim() : "";
+          if (!author) return err("author required");
+          if (!text) return err("text required");
+          const entry = await appendComment(id, author, text);
+          return json(entry, 201);
+        }
+        return err("method not allowed", 405);
+      } catch (e) {
+        return err(e instanceof Error ? e.message : String(e), 500);
+      }
+    }
+
+    const adrRefsMatch = pathname.match(/^\/api\/adrs\/(ADR-\d+)\/references$/);
+    if (adrRefsMatch) {
+      const id = adrRefsMatch[1];
+      try {
+        if (req.method === "GET") {
+          return json({ references: await listReferences(id) });
+        }
+        if (req.method === "POST") {
+          const payload = await req.json();
+          const filename = typeof payload.filename === "string" ? payload.filename.trim() : "";
+          const content = typeof payload.content === "string" ? payload.content : "";
+          if (!filename) return err("filename required");
+          await writeReference(id, filename, content);
+          return json({ ok: true, filename }, 201);
+        }
+        return err("method not allowed", 405);
+      } catch (e) {
+        return err(e instanceof Error ? e.message : String(e), 500);
+      }
+    }
+
+    const adrRefMatch = pathname.match(/^\/api\/adrs\/(ADR-\d+)\/references\/([^/]+)$/);
+    if (adrRefMatch && req.method === "GET") {
+      const content = await readReference(adrRefMatch[1], decodeURIComponent(adrRefMatch[2]));
+      if (content === null) return err("not found", 404);
+      return new Response(content, { headers: { "content-type": "text/plain; charset=utf-8" } });
+    }
+
+    const adrTransitionMatch = pathname.match(/^\/api\/adrs\/(ADR-\d+)\/transition$/);
+    if (adrTransitionMatch && req.method === "POST") {
+      const id = adrTransitionMatch[1];
+      try {
+        const payload = await req.json();
+        const to = (payload as { to?: unknown }).to;
+        const deciders = (payload as { deciders?: unknown }).deciders;
+        if (typeof to !== "string" || !ADR_STATES.includes(to as AdrState)) {
+          return err(`invalid target state: ${to}`);
+        }
+        if (!Array.isArray(deciders)) return err("deciders[] required");
+        await transitionAdr(id, to as AdrState, (deciders as unknown[]).map(String));
+        // On proposed→accepted, auto-fire promote-draft-tickets (TKT-223). Mints
+        // a backlog ticket per proposed_tickets[] entry, resolves DRAFT-N deps,
+        // and rewrites the ADR's frontmatter to record materialized_tickets[].
+        let promote: Awaited<ReturnType<typeof promoteDraftTickets>> | undefined;
+        if (to === "accepted") {
+          promote = await promoteDraftTickets(id);
+        }
+        return json({ ok: true, promote });
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        if (msg.startsWith("illegal transition:")) return json({ error: msg }, 409);
+        return err(msg, 500);
+      }
+    }
+
+    // Active agentic stacks — flow-chip-bar data for the dashboard.
+    // Scans .weave/cache/stacks/ for records with status in (planned, running)
+    // and returns:
+    //   - active: the most-recently-started record (or null) — preserved for
+    //     backward compatibility with any older consumer that read a single
+    //     record.
+    //   - active_list: every active record, sorted most-recently-started first
+    //     — consumed by the chip-bar (TKT-196).
+    if (pathname === "/api/stacks/active" && req.method === "GET") {
+      const stacksDir = join(CACHE, "stacks");
+      try {
+        const files = await readdir(stacksDir);
+        const records: Array<{ file: string; data: Record<string, unknown>; mtime: number }> = [];
+        for (const f of files) {
+          if (!f.endsWith(".json") || f === "config.json") continue;
+          try {
+            const raw = await readFile(join(stacksDir, f), "utf8");
+            const data = JSON.parse(raw) as Record<string, unknown>;
+            const s = await stat(join(stacksDir, f));
+            records.push({ file: f, data, mtime: s.mtimeMs });
+          } catch { /* skip malformed */ }
+        }
+        const statusActive = records.filter(
+          (r) => r.data.status === "running" || r.data.status === "planned",
+        );
+        // Deterministic cross-check: for agentic stacks, the ticket itself
+        // must still be in an in-flight lifecycle bucket. If a stack's status
+        // JSON was never updated after the ticket landed in 5-validating /
+        // 6-complete (or got moved back to 0-backlog / 1-staging), drop it from
+        // the bar so stale chips don't pile up. Validating is NOT "running":
+        // the build work is done and the ticket is awaiting review, so it
+        // should not light the chip-bar. Members in the stack are AND-ed: any
+        // member still in-flight keeps the stack visible.
+        const ACTIVE_BUCKETS = new Set<Bucket>([
+          "2-stuck", "3-building", "4-testing",
+        ]);
+        const active: typeof statusActive = [];
+        for (const r of statusActive) {
+          const members = Array.isArray(r.data.members) ? r.data.members as string[] : [];
+          if (r.data.agentic_mode !== true || members.length === 0) {
+            active.push(r);
+            continue;
+          }
+          let anyActive = false;
+          for (const m of members) {
+            const found = await findTicket(m);
+            if (found && ACTIVE_BUCKETS.has(found.bucket)) { anyActive = true; break; }
+          }
+          if (anyActive) active.push(r);
+        }
+        if (active.length === 0) return json({ active: null, active_list: [] });
+        // Most-recently-started wins. Fall back to mtime.
+        active.sort((a, b) => {
+          const aStart = typeof a.data.started_at === "string" ? Date.parse(a.data.started_at) : a.mtime;
+          const bStart = typeof b.data.started_at === "string" ? Date.parse(b.data.started_at) : b.mtime;
+          return bStart - aStart;
+        });
+        return json({
+          active: active[0].data,
+          active_list: active.map((r) => r.data),
+        });
+      } catch {
+        return json({ active: null, active_list: [] });
+      }
+    }
+
+    // Static
+    if (pathname.startsWith("/vendor/") || /\.(js|css|ico|png|svg)$/.test(pathname)) {
+      return serveStatic(pathname.replace(/^\//, ""));
+    }
+
+    return new Response("not found", { status: 404 });
+  },
+});
+
+console.log(`weave dashboard → http://${server.hostname}:${server.port}`);
