@@ -21,8 +21,8 @@ Prose-only "see also" pointers between skills should NOT add an edge — write t
 
 ```yaml
 connects_to:
-  - parent:security-backend    # I am security-backend's canonical entry point
-  - parent:security-frontend
+  - parent:<leaf-skill>        # I am <leaf-skill>'s canonical entry point
+  - parent:<another-leaf>
   - handoff:ticket-manager     # I dispatch to ticket-manager but it has its own parent
   - bug-scan                   # legacy bare slug = handoff (preserved for backwards-compat)
 ```
@@ -53,8 +53,8 @@ Walk this decision tree per outgoing edge:
 ### When to add an edge
 
 - **Orchestrator → subskill**. The orchestrator's body explicitly
-  dispatches to the subskill (e.g. `security` →
-  `security-backend`).
+  dispatches to the subskill (e.g. a `<domain>-router` →
+  `<domain>-implementation-audit`).
 - **Leaf → next-step skill**. The leaf's body recommends or invokes a
   follow-on skill (e.g. a hypothetical `payments-scaffold` →
   `migration-runner`, because after scaffolding a new thing the user
@@ -74,11 +74,11 @@ The graph should reflect **actual coupling**, not aspirational topology.
 ### Examples
 
 ```yaml
-# security/SKILL.md — owns the per-surface security leaves
+# a hypothetical <domain>-router/SKILL.md — owns the per-surface leaf audits
 connects_to:
-  - parent:security-frontend
-  - parent:security-backend
-  - parent:security-gcp
+  - parent:<domain>-frontend-audit
+  - parent:<domain>-backend-audit
+  - parent:<domain>-cloud-audit
 ```
 
 ```yaml
@@ -116,8 +116,8 @@ Values:
 
 | Value | Meaning | Examples |
 |---|---|---|
-| `orchestrator` | Routes/synthesizes intent over a cluster of subskills | `security`, plus hypothetical `backend-router`, `<domain>-review` |
-| `audit` | Read-only inspection; produces a report | `security-backend`, `security-frontend`, `security-gcp`, `bug-scan` |
+| `orchestrator` | Routes/synthesizes intent over a cluster of subskills | hypothetical `backend-router`, `<domain>-review` |
+| `audit` | Read-only inspection; produces a report | `security`, `bug-scan`, `adr-researcher` |
 | `action` | Mutates state (FS / API / data) | a hypothetical `migration-runner`, `acme-deploy` |
 | `generator` | Produces an artifact (graph, scaffold, doc) | `repo-map`, `skill-generator` |
 | `utility` | Self-contained tool, not a router or audit | `ticket-manager`, `skill-builder` |

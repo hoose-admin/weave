@@ -18,7 +18,7 @@ status: "Todo"
 priority: "High"  # P0 finding → priority: High
 assignee: "Claude-Agent"  # or "User" if requires human judgment
 created: <today's date>
-domain: <app | infra | docs | meta>  # from subskill source
+domain: <app | infra | docs | meta>  # inferred from the finding's resource path
 tags:
   - security
   - bug
@@ -31,15 +31,15 @@ files_touched: []
 
 ### Objective
 
-<One-paragraph description of the finding. Lead with the user-visible risk, then the technical surface. E.g.: "An authenticated user can write `subscriptionActive: true` to their own Firestore user doc, bypassing the API's subscription check in `auth.py` and accessing premium features without paying. Tightening this requires either field-level write rules or moving subscription state to a server-only collection.">
+<One-paragraph description of the finding. Lead with the user-visible risk, then the technical surface. E.g.: "An authenticated user can write a trust-bearing field (e.g. an entitlement flag) directly to their own record in the datastore, bypassing the server-side check in the auth layer and gaining access they should not have. Tightening this requires either field-level write rules in the datastore or moving the trusted state to a server-only store.">
 
 ### Context
 
 Surfaced by `/security` on <date> — see merged report.
 
-**Source 1 — [<subskill 1>]:** `<cite>` — <detail>
-**Source 2 — [<subskill 2>]:** `<cite>` — <detail>
-(if dedup'd across subskills)
+**Source 1:** `<cite>` — <detail>
+**Source 2:** `<cite>` — <detail>
+(only if multiple cites dedup'd into one finding)
 
 **CWE:** CWE-NNN — <name>
 **OWASP:** <category>
@@ -57,7 +57,7 @@ Surfaced by `/security` on <date> — see merged report.
 - [ ] <Specific, testable check 1 — usually "the fix sketch above"
 - [ ] Re-run `/security` — finding is RESOLVED in next snapshot diff.
 - [ ] If fix introduces user-visible behavior change, document in CHANGELOG or release notes.
-- [ ] If fix requires a data backfill (e.g. existing users with self-elevated `subscriptionActive`), file a separate remediation ticket.
+- [ ] If the fix requires a data backfill (e.g. existing records that already hold the self-elevated value), file a separate remediation ticket.
 
 ### Out of Scope
 
@@ -67,9 +67,7 @@ Surfaced by `/security` on <date> — see merged report.
 ### Notes
 
 - Auto-drafted by `/security` orchestrator. Review the finding's source cites + suggested-fix before accepting the framing — orchestrator output is starting material, not final spec.
-- If the finding is actually a false positive, add a suppression to the appropriate file:
-  - Cross-skill: `.claude/skills/security/suppressions.yaml`
-  - Subskill-specific: `.claude/skills/<subskill>/references/SUPPRESSIONS.md`
+- If the finding is actually a false positive, add a suppression (with a mandatory expiry) to `.claude/skills/security/suppressions.yaml`.
 
 ### Implementation Summary
 <!-- Populated automatically by the ticket-manager skill when this ticket moves to 4-testing.
@@ -81,13 +79,12 @@ Surfaced by `/security` on <date> — see merged report.
 
 For each NEW P0 finding:
 
-1. **Title:** `[<source-subskills>] <short-title from finding>` — example: `[security-backend, security-gcp] Firestore privesc on subscriptionActive`.
-2. **Domain:** map from primary source subskill:
-   - `security-frontend` → `app`
-   - `security-backend` → `app` (or `infra` if infra/deploy scoped)
-   - `security-gcp` → `infra`
-   - Multi-source → use whichever subskill has the source closer to the fix surface.
-3. **Tags:** always `security`, plus `bug` for P0 findings, plus a domain tag (`frontend`, `backend`, `gcp`).
+1. **Title:** `<severity-tag> <short-title from finding>` — example: `[P0] Missing object-level authorization on the order-lookup handler`.
+2. **Domain:** infer from the finding's resource path:
+   - application / source code → `app`
+   - deploy / config / infrastructure files → `infra`
+   - Multi-cite → use whichever cite is closer to the fix surface.
+3. **Tags:** always `security`, plus `bug` for P0 findings, plus a category tag from the finding (e.g. the vulnerability class — `xss`, `injection`, `authz`).
 4. **Related:** include any tickets the finding cross-references.
 5. **CVSS / CWE / OWASP:** copy verbatim from the orchestrator's merged finding.
 6. **Suggested fix → Acceptance Criteria:** convert the orchestrator's one-line fix sketch into bullet-form testable checks.

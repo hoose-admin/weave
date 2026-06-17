@@ -8,9 +8,9 @@ Every match MUST have evidence. A signature that finds no evidence yields no sig
 
 Three refinements driven by lessons from prior self-tests:
 
-1. **Stripe re-categorized** from "Data layers" → new "External services" section. Stripe is a payments/billing API the codebase calls into, not a persistent store the codebase reads/writes its own data from. Downstream mapping unchanged — `subscription-tier-audit` is still the right proposal for Stripe presence.
-2. **Universe / scope filter pattern tightened.** An early introspector cited a weak inline assignment (e.g. `_WHITELIST = "..."`) when the canonical constant lived in a dedicated `*/utils/`-style constants module. v0.2 prefers the canonical-constant location and treats inline lists / single-assignment constants as **weak evidence** (signal still fires but lower confidence).
-3. **Cost-sensitive operations gain a concrete no-partition-filter grep pattern.** An early version mentioned partition-filter cost as a pattern but gave no actionable regex; v0.2 documents a multiline pattern for detecting `FROM \`<project>.<dataset>.<table>\`` blocks without a `WHERE ts >=` or `WHERE date >=` clause within ~10 lines.
+1. **Payments/billing providers re-categorized** from "Data layers" → new "External services" section. A payments provider (e.g. Stripe) is an API the codebase calls into, not a persistent store the codebase reads/writes its own data from. Downstream mapping unchanged — `subscription-tier-audit` is still the right proposal when a payments provider is present.
+2. **Allow/deny scope filter pattern tightened.** An early introspector cited a weak inline assignment (e.g. `_WHITELIST = "..."`) when the canonical constant lived in a dedicated constants module. v0.2 prefers the canonical-constant location and treats inline lists / single-assignment constants as **weak evidence** (signal still fires but lower confidence).
+3. **Cost-sensitive operations gain a concrete full-scan grep pattern.** An early version mentioned per-query / partition-filter cost as a pattern but gave no actionable regex; v0.2 documents a multiline pattern for detecting `FROM <namespace>.<dataset>.<table>` blocks (any metered query engine) without a `WHERE`-clause filter on the table's partition/clustering column within ~10 lines.
 
 ---
 
@@ -18,18 +18,31 @@ Three refinements driven by lessons from prior self-tests:
 
 What counts as a deploy unit: a top-level directory that ships independently (own Dockerfile, own dependency manifest, own framework signature).
 
+No stack is privileged — this is an open catalog; a repo typically matches a small subset. Every row carries the same generic placeholder evidence shape; substitute the actual matched path at detection time.
+
 | Signal | Patterns | Evidence shape |
 |---|---|---|
-| **Next.js frontend** | `frontend/package.json` containing `"next":`; `next.config.{js,ts,mjs}`; `app/` or `pages/` dir | `frontend/package.json:<line>` |
-| **FastAPI backend** | `*.py` containing `from fastapi import` AND `app = FastAPI(` ; `requirements.txt` containing `fastapi` | `backend/api/main.py:<line>` |
-| **Cloud Run analytics container** | `Dockerfile` adjacent to a Python service; `requirements.txt` containing `google-cloud-*` | `backend/analytics/Dockerfile:<line>` |
-| **Bun dashboard** | `package.json` containing `"bun":` or `"@types/bun":`; `bun.lockb` | `.weave/package.json:<line>` |
-| **Static site** | `index.html` at root OR `_config.yml` (Jekyll) OR `astro.config.*` | `index.html:<line>` |
+| **JS/TS SPA or SSR frontend (Next.js)** | `<frontend-dir>/package.json` containing `"next":`; `next.config.{js,ts,mjs}`; `app/` or `pages/` dir | `<frontend-dir>/package.json:<line>` |
+| **JS/TS frontend (Vue/Nuxt)** | `nuxt.config.*`; `package.json` containing `"vue":` / `"nuxt":` | `<frontend-dir>/package.json:<line>` |
+| **JS/TS frontend (SvelteKit)** | `svelte.config.*`; `package.json` containing `"@sveltejs/kit":` | `<frontend-dir>/package.json:<line>` |
+| **JS/TS frontend (Angular)** | `angular.json`; `package.json` containing `"@angular/core":` | `<frontend-dir>/package.json:<line>` |
+| **JS/TS SPA (Vite)** | `vite.config.*`; `package.json` containing `"vite":` | `<frontend-dir>/package.json:<line>` |
+| **Python web backend (FastAPI)** | `*.py` containing `from fastapi import` AND `app = FastAPI(`; `requirements.txt` containing `fastapi` | `<backend-dir>/<entry>.<ext>:<line>` |
+| **Node backend (Express/Nest)** | `package.json` containing `"express":` / `"@nestjs/core":`; an HTTP-server entrypoint | `<backend-dir>/<entry>.<ext>:<line>` |
+| **Python web backend (Django)** | `manage.py`; `settings.py` with `INSTALLED_APPS` | `<backend-dir>/<entry>.<ext>:<line>` |
+| **Ruby backend (Rails)** | `config/routes.rb`; `Gemfile` containing `rails` | `<backend-dir>/<entry>.<ext>:<line>` |
+| **JVM backend (Spring Boot)** | `pom.xml` / `build.gradle` containing a Spring Boot starter; `@SpringBootApplication` | `<backend-dir>/<entry>.<ext>:<line>` |
+| **.NET backend** | `*.csproj`; `Program.cs` with a web host builder | `<backend-dir>/<entry>.<ext>:<line>` |
+| **Go backend (Gin/net-http)** | `go.mod` AND a `func main()` registering routes | `<backend-dir>/<entry>.<ext>:<line>` |
+| **PHP backend (Laravel)** | `composer.json` containing `laravel/framework`; `artisan` | `<backend-dir>/<entry>.<ext>:<line>` |
+| **Containerized service** | `Dockerfile` adjacent to a service; matching dependency manifest | `<service-dir>/Dockerfile:<line>` |
+| **Bun dashboard** | `package.json` containing `"bun":` or `"@types/bun":`; `bun.lockb` | `<frontend-dir>/package.json:<line>` |
+| **Static site** | `index.html` at root OR `_config.yml` (Jekyll) OR `astro.config.*` | `<frontend-dir>/index.html:<line>` |
 | **Python CLI/library** | `pyproject.toml` containing `[project.scripts]` or `[tool.poetry.scripts]` | `pyproject.toml:<line>` |
 | **Node CLI** | `package.json` containing `"bin":` | `package.json:<line>` |
-| **iOS/Android mobile** | `*.xcodeproj`, `*.gradle`, `AndroidManifest.xml` | `ios/Project.xcodeproj` |
+| **iOS/Android mobile** | `*.xcodeproj`, `*.gradle`, `AndroidManifest.xml` | `<mobile-dir>/<project>:<line>` |
 | **Rust service** | `Cargo.toml` containing `[[bin]]` | `Cargo.toml:<line>` |
-| **Go service** | `go.mod` AND `main.go` containing `func main()` | `cmd/server/main.go:<line>` |
+| **Go service** | `go.mod` AND `main.go` containing `func main()` | `<service-dir>/main.go:<line>` |
 
 ---
 
@@ -37,21 +50,26 @@ What counts as a deploy unit: a top-level directory that ships independently (ow
 
 What counts as a data layer: a persistent store the codebase reads from or writes to.
 
+No store is privileged — substitute the actual matched client/init module at detection time. Evidence shapes below use generic roles: `<datastore-client-module>` (a SQL/warehouse client wrapper), `<datastore-client>` (a document-store handle), `<auth-sdk-init>` (a managed-auth SDK init).
+
 | Signal | Patterns | Evidence shape |
 |---|---|---|
-| **BigQuery** | `from google.cloud import bigquery`; `@google-cloud/bigquery`; `bq query` in shell scripts | `backend/api/clients/bq.py:<line>` |
-| **PostgreSQL (asyncpg)** | `import asyncpg`; `asyncpg.connect`; `postgresql://` URLs | `backend/api/clients/pg.py:<line>` |
-| **PostgreSQL (psycopg)** | `import psycopg`; `psycopg2`; `psycopg.connect` | — |
-| **PostgreSQL (SQLAlchemy)** | `from sqlalchemy`; `create_engine("postgresql://"` | — |
-| **MySQL** | `import pymysql`; `mysql.connector`; `mysql://` URLs | — |
-| **SQLite** | `import sqlite3`; `*.db` or `*.sqlite` files committed | — |
-| **Firestore** | `from google.cloud import firestore`; `firebase-admin`; `firestore.rules` | `frontend/lib/firestore.ts:<line>` |
-| **Firebase Auth** | `import firebase_admin`; `firebase/auth` in JS; `firebase.json` | `frontend/lib/firebase.ts:<line>` |
-| **Redis** | `import redis`; `ioredis`; `redis://` URLs | — |
-| **MongoDB** | `pymongo`; `mongoose`; `mongodb://` URLs | — |
-| **Kafka** | `kafka-python`; `kafkajs`; `KAFKA_BOOTSTRAP_SERVERS` env | — |
-| **Elasticsearch** | `elasticsearch-py`; `@elastic/elasticsearch` | — |
-| **S3 / GCS object storage** | `boto3.client('s3')`; `from google.cloud import storage`; bucket env vars | — |
+| **BigQuery** | `from google.cloud import bigquery`; `@google-cloud/bigquery`; `bq query` in shell scripts | `<datastore-client-module>:<line>` |
+| **AWS Athena** | `boto3.client('athena')`; `start_query_execution`; `athena://` / PyAthena | `<datastore-client-module>:<line>` |
+| **Snowflake** | `snowflake.connector`; `snowflake-sqlalchemy`; `.snowflakecomputing.com` account URLs | `<datastore-client-module>:<line>` |
+| **Redshift** | `redshift_connector`; `redshift+psycopg2://`; `*.redshift.amazonaws.com` URLs | `<datastore-client-module>:<line>` |
+| **PostgreSQL (asyncpg)** | `import asyncpg`; `asyncpg.connect`; `postgresql://` URLs | `<datastore-client-module>:<line>` |
+| **PostgreSQL (psycopg)** | `import psycopg`; `psycopg2`; `psycopg.connect` | `<datastore-client-module>:<line>` |
+| **PostgreSQL (SQLAlchemy)** | `from sqlalchemy`; `create_engine("postgresql://"` | `<datastore-client-module>:<line>` |
+| **MySQL** | `import pymysql`; `mysql.connector`; `mysql://` URLs | `<datastore-client-module>:<line>` |
+| **SQLite** | `import sqlite3`; `*.db` or `*.sqlite` files committed | `<datastore-client-module>:<line>` |
+| **Firestore** | `from google.cloud import firestore`; `firebase-admin`; `firestore.rules` | `<datastore-client>:<line>` |
+| **Firebase Auth** | `import firebase_admin`; `firebase/auth` in JS; `firebase.json` | `<auth-sdk-init>:<line>` |
+| **Redis** | `import redis`; `ioredis`; `redis://` URLs | `<datastore-client-module>:<line>` |
+| **MongoDB** | `pymongo`; `mongoose`; `mongodb://` URLs | `<datastore-client>:<line>` |
+| **Kafka** | `kafka-python`; `kafkajs`; `KAFKA_BOOTSTRAP_SERVERS` env | `<datastore-client-module>:<line>` |
+| **Elasticsearch** | `elasticsearch-py`; `@elastic/elasticsearch` | `<datastore-client-module>:<line>` |
+| **S3 / GCS object storage** | `boto3.client('s3')`; `from google.cloud import storage`; bucket env vars | `<datastore-client-module>:<line>` |
 
 For each match, also capture: (a) read-only vs read-write usage (look for `INSERT`, `UPDATE`, `client.write_*`, `bucket.upload_*`), (b) which deploy unit imports the client.
 
@@ -65,14 +83,14 @@ External APIs the codebase calls into for capability rather than for data storag
 
 | Signal | Patterns | Evidence shape |
 |---|---|---|
-| **Stripe (billing / payments)** | `stripe.api_key`; `@stripe/stripe-js`; `@stripe/react-stripe-js`; webhook signature constants | `frontend/package.json:<line>` |
-| **Sentry (error tracking)** | `sentry_sdk.init`; `@sentry/nextjs`; `@sentry/node` | — |
-| **Datadog (APM / metrics)** | `datadog`; `ddtrace`; `@datadog/browser-rum` | — |
-| **SendGrid / Postmark / SES (transactional email)** | `sendgrid`; `postmark`; `boto3.client('ses')` | — |
-| **Twilio (SMS / voice)** | `twilio`; `twilio.rest.Client` | — |
-| **OpenAI / Anthropic / generic LLM API** | `openai`; `anthropic`; `@anthropic-ai/sdk` (skip if this skill IS the consumer — context-dependent) | — |
-| **Slack (notifications)** | `slack_sdk`; `@slack/web-api`; webhook URLs | — |
-| **GitHub API** | `PyGithub`; `octokit`; `gh` CLI invocations from code | — |
+| **Payments / billing provider (e.g. Stripe)** | `stripe.api_key`; `@stripe/stripe-js`; `@stripe/react-stripe-js`; webhook signature constants | `<billing-integration-module>:<line>` |
+| **Error tracking (e.g. Sentry)** | `sentry_sdk.init`; `@sentry/nextjs`; `@sentry/node` | `<integration-module>:<line>` |
+| **APM / metrics (e.g. Datadog)** | `datadog`; `ddtrace`; `@datadog/browser-rum` | `<integration-module>:<line>` |
+| **Transactional email (SendGrid / Postmark / SES)** | `sendgrid`; `postmark`; `boto3.client('ses')` | `<integration-module>:<line>` |
+| **SMS / voice (e.g. Twilio)** | `twilio`; `twilio.rest.Client` | `<integration-module>:<line>` |
+| **LLM API (OpenAI / Anthropic / generic)** | `openai`; `anthropic`; `@anthropic-ai/sdk` (skip if this skill IS the consumer — context-dependent) | `<integration-module>:<line>` |
+| **Notifications (e.g. Slack)** | `slack_sdk`; `@slack/web-api`; webhook URLs | `<integration-module>:<line>` |
+| **Source-host API (e.g. GitHub)** | `PyGithub`; `octokit`; `gh` CLI invocations from code | `<integration-module>:<line>` |
 
 ---
 
@@ -82,29 +100,29 @@ What counts as a cross-cutting concern: a domain that touches multiple deploy un
 
 | Signal | Patterns | Evidence shape |
 |---|---|---|
-| **Authentication** | `firebase-admin` import; `verifyIdToken`; OAuth callback routes; `Authorization: Bearer`; JWT decode | `backend/api/middleware/auth.py:<line>` |
-| **Subscription / billing** | `stripe.api_key`; `webhook_secret`; subscription/plan/tier columns; `customClaims` | `backend/api/routers/billing.py:<line>` |
-| **Webhook handling** | `webhook` in route paths; signature verification (`hmac.compare_digest`, `stripe.Webhook.construct_event`) | — |
-| **Rate limiting** | `from slowapi`; `@limiter.limit`; `RateLimiter` middleware; Cloudflare config | — |
-| **CORS** | `CORSMiddleware`; `allow_origins`; `Access-Control-Allow-Origin` | — |
-| **Observability — logging** | `import logging` with structured logging; `loguru`; `structlog`; `pino` | — |
-| **Observability — tracing** | `opentelemetry`; `sentry_sdk.init`; `datadog`; `@sentry/nextjs` | — |
-| **Observability — metrics** | `prometheus_client`; `@opentelemetry/api-metrics` | — |
-| **Cost-sensitive operations** | BigQuery scans without partition filters (see "BQ no-partition-filter pattern" below); large `SELECT *`; unbounded loops over expensive APIs | — |
-| **Numeric conventions** | percent-vs-decimal scale comments; `_pct` / `_percent` column suffixes; `Decimal(...)` usage in finance code | — |
-| **Detector / pipeline pattern** | `detectors/`, `patterns/`, `runners/`, `*_detector.py` files; recurring `confidence`, `forward_return`, `horizon` columns | — |
-| **Universe / scope filter** | a named whitelist/exclusion constant (e.g. `*_WHITELIST` / `*_EXCLUDED`) in a dedicated `*/utils/`-style module (canonical strong evidence); similar named constants elsewhere (medium evidence); hard-coded inline whitelists, single-assignment constants (weak evidence — signal still fires but lower confidence) | prefer the canonical `*/utils/<module>.py:<line>` when that location matches |
+| **Authentication** | managed-auth SDK import (e.g. `firebase-admin`); `verifyIdToken`; OAuth callback routes; `Authorization: Bearer`; JWT decode | `<auth-module>:<line>` |
+| **Subscription / billing** | payments-SDK key (e.g. `stripe.api_key`); `webhook_secret`; subscription/plan/tier columns; entitlement claims | `<billing-route>:<line>` |
+| **Webhook handling** | `webhook` in route paths; signature verification (`hmac.compare_digest`, provider `construct_event`) | `<webhook-route>:<line>` |
+| **Rate limiting** | `from slowapi`; `@limiter.limit`; `RateLimiter` middleware; edge/CDN config | `<middleware-module>:<line>` |
+| **CORS** | `CORSMiddleware`; `allow_origins`; `Access-Control-Allow-Origin` | `<middleware-module>:<line>` |
+| **Observability — logging** | `import logging` with structured logging; `loguru`; `structlog`; `pino` | `<logging-init>:<line>` |
+| **Observability — tracing** | `opentelemetry`; `sentry_sdk.init`; `datadog`; `@sentry/nextjs` | `<tracing-init>:<line>` |
+| **Observability — metrics** | `prometheus_client`; `@opentelemetry/api-metrics` | `<metrics-init>:<line>` |
+| **Cost-sensitive operations** | metered-query full scans without a partition/cluster filter (see "Unbounded full-scan / per-query-cost pattern" below); large `SELECT *`; unbounded loops over expensive APIs | `<query-module>:<line>` |
+| **Numeric conventions** | scale comments (percent-vs-decimal, units); `_pct` / `_bps` / `_cents` column suffixes; `Decimal(...)` usage in money/measurement code | `<schema-or-model>:<line>` |
+| **Batch / pipeline pattern** | repeated `*_job` / `*_processor` / `*_runner` modules sharing a common row schema; directories like `jobs/`, `processors/`, `pipelines/` | `<pipeline-module>:<line>` |
+| **Allow / deny scope filter** | a named allow/deny scope constant (e.g. `*_WHITELIST` / `*_ALLOWED` / `*_EXCLUDED`) in a dedicated constants module (canonical strong evidence); similar named constants elsewhere (medium evidence); hard-coded inline lists, single-assignment constants (weak evidence — signal still fires but lower confidence) | prefer the canonical `<constants-module>:<line>` when that location matches |
 
-### BQ no-partition-filter pattern (v0.2, expands "Cost-sensitive operations")
+### Unbounded full-scan / per-query-cost pattern (v0.2, expands "Cost-sensitive operations")
 
-When a query reads a partitioned BigQuery table without a `WHERE` clause filtering the partition column, the engine full-scans the table — for large tables (>100K rows) this is typically a P0 cost finding (high scan cost).
+Applies to ANY metered query engine — one that charges per byte scanned or per query (e.g. BigQuery, Athena, Snowflake, Redshift, Databricks SQL). When a query reads a large partitioned/clustered table without a `WHERE` clause filtering the table's declared partition/clustering column, the engine full-scans the table — for large tables (>100K rows) this is typically a P0 cost finding (high scan cost).
 
-The introspection subagent should grep for `FROM` clauses of `<project>.<dataset>.<table>` shape (or `\`<project>.<dataset>.<table>\`` with backticks) and confirm a `WHERE` clause referencing a partition-column predicate appears within ~10 lines of the `FROM`. Common partition columns are `ts` (TIMESTAMP), `date` (DATE), `as_of_date` (DATE), or `event_ts` (TIMESTAMP).
+The introspection subagent should grep for `FROM` clauses of `<namespace>.<dataset>.<table>` shape (or backtick/quoted equivalents) and confirm a `WHERE` clause referencing the partition/clustering-column predicate appears within ~10 lines of the `FROM`. The predicate column is whatever the table declares as its partition/clustering column — commonly a timestamp/date column (e.g. a `ts` / `date` / `*_ts` / `*_date` column).
 
-**Multi-line regex (Python flavor, DOTALL):**
+**BigQuery-flavored example (Python regex, DOTALL) — one engine's syntax; adapt the table-reference shape and column name per engine:**
 
 ```python
-FROM\s+`?\w+\.\w+\.\w+`?(?:[^;]{0,500})WHERE(?:[^;]{0,500})\b(ts|date|as_of_date|event_ts)\s*(>=|>|=|BETWEEN)
+FROM\s+`?\w+\.\w+\.\w+`?(?:[^;]{0,500})WHERE(?:[^;]{0,500})\b(?:ts|date|\w+_ts|\w+_date)\s*(>=|>|=|BETWEEN)
 ```
 
 Match → partition-filtered (clean). **Non-match → flag as missing-partition-filter** for a downstream cost-sizing step to size + price. The introspection subagent should report the offending `file:line` of the `FROM` clause and the table name; cost projection is downstream work, not this skill's.
@@ -120,15 +138,15 @@ False-positive notes:
 
 | Signal | Patterns | Evidence shape |
 |---|---|---|
-| **GCP Cloud Run** | `gcloud run deploy`; `cloud-run-*.yaml`; `Cloud Run` in deploy docs | `Makefile:<line>` |
-| **GCP Cloud Scheduler** | `gcloud scheduler`; `cloud-scheduler-*.yaml` | — |
-| **AWS Lambda** | `serverless.yml`; `template.yaml` (SAM); `lambda_handler` | — |
-| **AWS ECS / Fargate** | `task-definition.json`; `ecs-cli` | — |
-| **Vercel** | `vercel.json`; `.vercel/` | — |
-| **Netlify** | `netlify.toml`; `_redirects` | — |
-| **Fly.io** | `fly.toml` | — |
-| **Docker (generic)** | `Dockerfile`; `docker-compose*.yml` | — |
-| **Kubernetes** | `*.yaml` with `apiVersion: apps/v1` and `kind: Deployment` | — |
+| **GCP Cloud Run** | `gcloud run deploy`; `cloud-run-*.yaml`; `Cloud Run` in deploy docs | `<build-file>:<line>` |
+| **GCP Cloud Scheduler** | `gcloud scheduler`; `cloud-scheduler-*.yaml` | `<deploy-config>:<line>` |
+| **AWS Lambda** | `serverless.yml`; `template.yaml` (SAM); `lambda_handler` | `<deploy-config>:<line>` |
+| **AWS ECS / Fargate** | `task-definition.json`; `ecs-cli` | `<deploy-config>:<line>` |
+| **Vercel** | `vercel.json`; `.vercel/` | `<deploy-config>:<line>` |
+| **Netlify** | `netlify.toml`; `_redirects` | `<deploy-config>:<line>` |
+| **Fly.io** | `fly.toml` | `<deploy-config>:<line>` |
+| **Docker (generic)** | `Dockerfile`; `docker-compose*.yml` | `<service-dir>/Dockerfile:<line>` |
+| **Kubernetes** | `*.yaml` with `apiVersion: apps/v1` and `kind: Deployment` | `<deploy-config>:<line>` |
 
 ---
 

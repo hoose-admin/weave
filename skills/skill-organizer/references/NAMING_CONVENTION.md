@@ -16,7 +16,7 @@ routes to other skills rather than doing the leaf work itself.
 
 | Shape | Naming | Defining property | Examples |
 |---|---|---|---|
-| **Intent router** | `*-router` suffix | Takes a user request, picks which 1-N leaf skills to invoke, gets out of the way. Does no analysis itself. Body is dominated by a routing table. | hypothetical `backend-router`, `gcp-router`, `<domain>-router` |
+| **Intent router** | `*-router` suffix | Takes a user request, picks which 1-N leaf skills to invoke, gets out of the way. Does no analysis itself. Body is dominated by a routing table. | hypothetical `backend-router`, `cloud-router`, `<domain>-router` |
 | **One-shot synthesizer** | `*-review` suffix | Runs a fixed set of leaf skills in sequence, dedups + merges their findings into a single principal-engineer report. **No** cross-run state. | hypothetical `<domain>-review` |
 | **Domain entry point** | plain domain noun (no suffix) | The user-facing entry point for an entire concern. May internally be a synthesizer with snapshot-over-time diffs, but the implementation shape is invisible to the user — they just say "security" or "data-health" to start the conversation. | `security`, `data-health` |
 
@@ -44,7 +44,7 @@ here is looser — the suffix should describe **what the skill produces**:
 
 | Suffix | Shape | Examples |
 |---|---|---|
-| `*-audit` | Read-only inspection that produces a P0/P1/P2 punch list. | `security-backend`, `security-frontend`, `<layer>-schema-audit`, `<layer>-cost-audit` |
+| `*-audit` | Read-only inspection that produces a P0/P1/P2 punch list. | `bug-scan`, `<layer>-schema-audit`, `<layer>-cost-audit` |
 | `*-planner` | Produces a plan / scaffold, never executes. | a hypothetical `migration-planner` |
 | `*-runner` | Dispatches an existing, well-defined operation. | a hypothetical `migration-runner` |
 | `*-gate` | Pre-mutation check with a confirmation prompt. | a hypothetical `db-mutation-gate` |
@@ -85,7 +85,6 @@ matching `propose-rename` 4Q downgrade in `PORTFOLIO_REORG_PLAN.md`.
 When a cluster has 3+ siblings, prefer a shared prefix so the cluster is
 discoverable by lexical sort:
 
-- `security-*` (frontend, backend, gcp)
 - `skill-*` (builder, generator, organizer)
 - `adr-*` (manager, researcher)
 - `<domain>-*` (e.g. effectiveness, implementation-audit, scaffold, catalog)

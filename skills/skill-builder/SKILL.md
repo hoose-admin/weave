@@ -190,7 +190,7 @@ Two forms, depending on the calling op:
 
 1. **Load candidate text.** Either read the slug's SKILL.md frontmatter (via `.weave/lib/frontmatter.ts:44 parse()`) or take the literal strings from the CLI args. Concatenate `description + " " + when_to_use` into one string `candidateText`.
 2. **Load corpus.** Walk every `.claude/skills/*/SKILL.md` (skip the candidate's own file if it exists), parse frontmatter, build a map `slug → description + " " + when_to_use`. This is the comparison corpus.
-3. **Tokenize.** Lowercase, strip punctuation, **split on whitespace AND hyphens** (so `security-frontend` becomes 2 tokens — without this, hyphenated skill slugs never match across skills that write the same words unhyphenated). Apply:
+3. **Tokenize.** Lowercase, strip punctuation, **split on whitespace AND hyphens** (so `bug-scan` becomes 2 tokens — without this, hyphenated skill slugs never match across skills that write the same words unhyphenated). Apply:
    - **Stop-word filter** — drop tokens that appear in nearly every skill description and carry no signal. Starter list (tune over time): `the, a, an, of, for, and, or, to, in, on, with, this, that, when, what, which, run, runs, produce, produces, report, reports, skill, skills, user, audit, audits, plus, also, used, is, be, are, as, does, do, not, no, by, from, but, via, its, it, they, their, each, every, one, two, three`. Note: `dashboard` and `graph` are intentionally NOT stop-words — they ARE signal.
    - **Light lemmatization** — strip trailing `-s`, `-ing`, `-ed` from any remaining token of length ≥ 5. This collapses `audits` / `auditing` / `audited` → `audit`. Skip for tokens that are already stop-listed (`audits` is dropped above; this is for words like `rebuild` / `rebuilds` / `rebuilding`).
 4. **Score each (candidate, existing-skill) pair.**
@@ -216,14 +216,14 @@ Two forms, depending on the calling op:
 
 ### Calibration target (unit test for the implementation)
 
-Running `overlap-check security-backend` against the current portfolio must produce a result of roughly this shape (a sibling in the same family surfaces as low-tier adjacency, never a near-duplicate):
+Running `overlap-check bug-scan` against the current portfolio must produce a result of roughly this shape (an adjacent audit surfaces as low-tier adjacency, never a near-duplicate):
 
 ```
-P2  security-frontend    J=0.16   2-word: security audit | check matrix
-P2  security-gcp         J=0.11   2-word: security audit
+P2  security            J=0.15   2-word: verified findings
+P2  adr-researcher      J=0.11   2-word: (none)
 ```
 
-If a same-family sibling escalates to P0, thresholds are too aggressive. If it disappears entirely, the tokenizer / stop-word list regressed.
+If an adjacent audit escalates to P0, thresholds are too aggressive. If it disappears entirely, the tokenizer / stop-word list regressed.
 
 ### When to invoke
 

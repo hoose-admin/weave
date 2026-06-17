@@ -13,8 +13,8 @@
 //
 // This is a GENERIC builder: it detects the stack from the repo rather than
 // hard-wiring any one app's conventions. It is tuned to produce a correct graph
-// for the woventale repo (Next.js App Router + "use server" Server Actions +
-// Google Cloud Firestore + a single Cloud Run container) but degrades
+// for a common web stack (an SSR/App-Router frontend with server-side data
+// functions, a document store, and a single deploy container) but degrades
 // gracefully — an absent layer yields an empty layer plus a warning rather than
 // a crash.
 //
@@ -103,7 +103,7 @@ const IGNORE_DIRS = new Set([
   "target", ".idea", ".vscode", ".pytest_cache", ".mypy_cache", ".svelte-kit",
 ]);
 
-const MAX_REACHABLE_DEPTH = 3; // import-chase depth from a page (mirrors loopweave)
+const MAX_REACHABLE_DEPTH = 3; // import-chase depth from a page
 
 // ── Generic filesystem walk ──────────────────────────────────────────────────
 
@@ -272,7 +272,7 @@ async function detectContainers(
   if (mk) {
     const isCloudRun = /gcloud\s+run\s+deploy/.test(mk);
     const platform = isCloudRun ? "Cloud Run" : undefined;
-    // SERVICE_NAME := woventale-app   (Make's := / = / ?= assignment forms)
+    // SERVICE_NAME := <service-name>   (Make's := / = / ?= assignment forms)
     const svc = mk.match(/^\s*SERVICE_NAME\s*[:?]?=\s*([A-Za-z0-9_.-]+)/m);
     if (svc && !svc[1].startsWith("$")) add(svc[1], platform, rel(makefile));
     // `gcloud run deploy <literal-name>` (skip `$(VAR)` / `${VAR}` forms).
@@ -749,8 +749,8 @@ function extractFirestoreStores(
   return { reads, writes };
 }
 
-// Generic SQL / BigQuery table extraction. Best-effort, additive — woventale
-// has none, but a generic builder shouldn't ignore other stacks.
+// Generic SQL / BigQuery table extraction. Best-effort, additive — a repo may
+// have none, but a generic builder shouldn't ignore other stacks.
 //
 // CRITICAL: we mine table names ONLY from genuine string/template literals (a
 // real SQL query always lives in one). Scanning raw source would match prose in
@@ -866,7 +866,7 @@ function extractSqlBqStores(body: string): {
 
 // Resolve a local import spec (`@/...` alias, or relative `./` `../`) to an
 // absolute file path under the repo. `@/` maps to `src/` (the standard Next.js
-// alias; confirmed by woventale's tsconfig `"@/*": ["./src/*"]`).
+// alias; e.g. a tsconfig `"@/*": ["./src/*"]` path mapping).
 async function resolveLocalImport(
   fromFile: string,
   spec: string,
@@ -918,9 +918,9 @@ function localImportSpecs(src: string): string[] {
 }
 
 // Collect the set of files reachable from a page by following LOCAL imports
-// (components / hooks / lib / actions), bounded to MAX_REACHABLE_DEPTH. Mirrors
-// loopweave's `collectReachable`, but follows ALL local imports (not just a
-// hard-coded prefix list) so it works on any directory layout.
+// (components / hooks / lib / actions), bounded to MAX_REACHABLE_DEPTH. Follows
+// ALL local imports (not just direct page imports / a hard-coded prefix list)
+// so it works on any directory layout.
 async function collectReachable(
   pageFile: string,
   cache: Map<string, string[]>,

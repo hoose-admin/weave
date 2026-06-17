@@ -45,7 +45,7 @@ children (router-over-synthesizer).
 
 | Skill | parent edges added |
 |---|---|
-| `security` | `security-frontend`, `security-backend`, `security-gcp` |
+| a `<family>-router` | `<family>-frontend`, `<family>-backend`, `<family>-cloud` |
 | a `backend-router` | its leaf audits + `backend-review` |
 | a `<domain>-router` | its `<domain>-*` leaves (a shared `<layer>-data-model` stays `handoff`) |
 
@@ -116,7 +116,7 @@ ticket filed.
 
 | Cluster | Members | Existing orchestrator | Action | Rationale (cites snapshot) | Child ticket |
 |---|---|---|---|---|---|
-| **security** | security-frontend, security-backend, security-gcp | security (composer) | **no-op** | Snapshot rows: 0 findings. Well-shaped. | — |
+| **a `<family>` cluster** | `<family>-frontend`, `<family>-backend`, `<family>-cloud` | a `<family>-router` (composer) | **no-op** | Snapshot rows: 0 findings. Well-shaped. | — |
 | **skills (meta)** | skill-builder, skill-organizer, skill-generator | skill-organizer (proposer) | **no-op** | P2 sibling overlap is intentional, resolved by `connects_to` + `SKILL_OWNERSHIP_BOUNDARIES.md`. | — |
 | **adr** | adr-manager, adr-researcher | adr-manager (lifecycle) | **no-op** | Researcher feeds the manager; boundary already documented. | — |
 | **a `<domain>` cluster** | `<domain>-effectiveness`, `<domain>-implementation-audit`, `<domain>-scaffold` | a `<domain>-router` | **no-op** | Router already routes; per-domain synthesis lens is sufficient — adding a posture analog would fail 4Q (not load-bearing). | — |

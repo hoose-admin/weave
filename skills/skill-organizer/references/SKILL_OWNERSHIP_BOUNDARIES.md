@@ -95,7 +95,7 @@ owner; siblings that need the same signal invoke the owner. A generic shape:
 |---|---|---|
 | Resolve a `<domain>`-shaped intent to one or more downstream skills | a `<domain>-router` | Routes-only. Pre-routing reads are advisory; never executes writes. |
 | Map a route to its dependency chain (backend routes, query keys, tables, auth claims) | a `<layer>-data-model` | Current-state walk; consumes the `repo-map` dependency graph. |
-| Per-surface security audit | `security-gcp` (and its `security-*` siblings) | Each owns one surface; the `security` composer dedups across them. |
+| Security audit across the diff | `security` | Single audit skill; wraps the `/security-review` engine for detection and composes its findings into the board (dedup, severity bands, snapshot diff). No per-surface siblings. |
 
 **Boundary notes (the pattern to copy):**
 - A router does NOT do the leaf work itself — every check is delegated.

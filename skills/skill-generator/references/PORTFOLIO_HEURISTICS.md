@@ -12,16 +12,16 @@ For each deploy unit detected, propose the following skill candidates. Each cand
 
 | Candidate | When | Rationale |
 |---|---|---|
-| `security-<unit>` | Always per deploy unit | OWASP-style audit of unit-specific surfaces (XSS for frontend; OWASP API for backend; container hardening for cloud-run) |
+| `security` | Always per deploy unit | OWASP-style audit of unit-specific surfaces (XSS for a frontend; OWASP API for a backend; container/deploy-target hardening for a containerized unit) — one `security` skill covers all units |
 | `<unit>-data-model` | Unit reads OR writes a data layer | Maps unit-to-data-layer dependencies for the unit's perspective |
 | `<unit>-orchestrator` | ≥3 child skills emerge for this unit | Single routing entrypoint for the unit's skill family |
 | a `route-stack-architect`-style skill | Unit is a frontend that talks to a backend over HTTP routes | Per-route end-to-end design + drift audit |
-| `<runtime>-colima` or `<runtime>-stack` | Unit ships in Docker AND has local-dev complexity | Local-stack lifecycle orchestration |
+| `<runtime>-stack` (container/deploy-target hardening for the unit's runtime) | Unit ships in a container (Docker / Compose / Podman / Colima) AND has local-dev complexity | Local-stack lifecycle orchestration |
 
 Examples:
-- Next.js frontend → `security-frontend`, a `frontend-data-model`, a `route-stack-architect`-style skill (if backend HTTP target detected)
-- FastAPI backend → `security-backend`, a `backend-data-model`, a `backend-router` (if ≥3 backend skills)
-- Cloud Run analytics container → `security-backend` (folds in), a `<layer>-data-model`
+- A frontend deploy unit (Next.js, Vue, SvelteKit, …) → `security`, a `<unit>-data-model`, a `route-stack-architect`-style skill (if a backend HTTP target detected)
+- A backend deploy unit (FastAPI, Express, Django, Spring, …) → `security`, a `<unit>-data-model`, a `<unit>-router` (if ≥3 skills for the unit)
+- A containerized analytics service → `security` (folds in), a `<layer>-data-model`
 
 ---
 
@@ -40,9 +40,9 @@ For each data layer detected, propose the canonical audit family.
 | a `db-mutation-gate`-style skill | Codebase has any destructive DB ops (`DROP`, `TRUNCATE`, etc.) | Pre-mutation impact report + confirmation gate |
 
 Examples:
-- BigQuery → `<layer>-schema-audit`, `<layer>-data-integrity-audit`, `<layer>-stale-data-audit`, `<layer>-cost-audit`
-- Cloud SQL Postgres (cache layer) → `<cache-layer>-data-health-audit`, `<cache-layer>-schema-coordinator`
-- Firestore → `<layer>-data-integrity-audit` only (no schemas, no per-query cost, no scans)
+- A typed/columnar store (Postgres, BigQuery, Snowflake, …) → `<layer>-schema-audit`, `<layer>-data-integrity-audit`, `<layer>-stale-data-audit` + `<layer>-cost-audit` (only if the store charges per query)
+- A relational store used as a cache layer (e.g. Postgres + sync-from-source) → `<cache-layer>-data-health-audit`, `<cache-layer>-schema-coordinator`
+- A document store (Firestore, MongoDB, DynamoDB, …) → `<layer>-data-integrity-audit` only (no typed schemas, no per-query cost, no scans)
 
 ---
 
@@ -50,9 +50,9 @@ Examples:
 
 | Candidate | When | Rationale |
 |---|---|---|
-| `auth-flow-audit` | Authentication signals present (Firebase Auth, OAuth, JWT) | End-to-end audit of token flow, custom claims, impersonation surface |
-| `subscription-tier-audit` | Subscription / billing signals present (Stripe, custom claims for tiers) | Tier-gating coverage across routes |
-| `security` | Multiple security-* skills emerge AND multiple cross-cutting concerns present | Orchestrator that composes per-unit security audits |
+| `auth-flow-audit` | Authentication signals present (a managed auth provider — Firebase Auth / Auth0 / Cognito / Clerk — OAuth/OIDC, or JWT/session) | End-to-end audit of token flow, custom claims, impersonation surface |
+| `subscription-tier-audit` | Subscription / billing signals present (any payments provider + a tier/role/entitlement mechanism) | Tier-gating coverage across routes |
+| `security` | Multiple security-relevant surfaces emerge across units AND multiple cross-cutting concerns present | A single `security` skill that composes per-unit security audits |
 | a `pattern-unifier`-style skill | Pipeline / computed-signal pattern signals present AND ≥2 such pipelines detected | DRY audit for repeated SQL/Python idioms |
 | a `<layer>-cost-audit` skill | Cost-sensitive operation signals present | Standalone cost-tracking skill |
 | a `log-driven-maintenance`-style skill | Observability — logging signals present AND deploy is Cloud Run / Lambda / similar | Periodic log audit for error-rate spikes |

@@ -34,7 +34,7 @@ Domains default to `app | infra | docs | meta` — rename them for your repo.
 | `ticket-manager` | Owns the `.tickets/` lifecycle (create / refine / build / test / validate / link). |
 | `bug-scan` | Multi-agent bug hunt → files verified findings as backlog tickets. |
 | `adr-manager` / `adr-researcher` | Create and research Architecture Decision Records (`.tickets/ADRs/`). |
-| `security` (+ frontend/backend/gcp) | Read-only security audits → P0/P1/P2 punch lists. |
+| `security` | Wraps the `/security-review` engine and composes findings into the board (dedup, severity, snapshot diff, auto-draft). |
 | `skill-builder` / `skill-generator` / `skill-organizer` | Author, bootstrap, and curate your own skills. |
 
 ## The dashboard

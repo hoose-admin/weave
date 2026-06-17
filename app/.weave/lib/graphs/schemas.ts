@@ -1,8 +1,8 @@
 // Generic, detection-based multi-database schema graph for the dashboard's
 // /graphs/schemas view.
 //
-// Generalizes the loopweave-specific BigQuery schema builder (bq-schema.ts)
-// into a MULTI-DATABASE diagram. It auto-detects which databases a repo uses —
+// Generalizes a BigQuery-specific schema builder into a MULTI-DATABASE
+// diagram. It auto-detects which databases a repo uses —
 // Firestore/Firebase, SQL (Prisma / Drizzle / raw .sql), and BigQuery — and
 // renders each database's tables/collections + columns/fields + relationships,
 // merged into one Cytoscape graph and tagged per `db`.
@@ -15,8 +15,9 @@
 // This is the ONE graph that uses Cytoscape compound parent nodes (every column
 // declares data.parent = its table id); the viewer collapses tables by default.
 //
-// Each DB lives behind a SchemaProvider seam (ported from bq-schema.ts) so the
-// set of databases is open: a provider detect()s its own usage and introspect()s
+// Each DB lives behind a SchemaProvider seam (extracted from the original
+// single-database builder) so the set of databases is open: a provider
+// detect()s its own usage and introspect()s
 // either statically (parse source, no credentials) or live (behind opts.live).
 // If NO database is detected the graph is empty plus a "no-database" warning —
 // it never crashes on an arbitrary repo.
@@ -1175,7 +1176,7 @@ function parseDrizzle(src: string, tables: TableDef[], seen: Set<string>): void 
   }
 }
 
-// ── BigQueryProvider (ported from bq-schema.ts BqStaticProvider) ──────────────
+// ── BigQueryProvider (the BigQuery-specific static provider) ──────────────────
 
 const BQ_FIELD_RE =
   /bigquery\.SchemaField\(\s*["']([a-zA-Z_][a-zA-Z0-9_]*)["']\s*,\s*["']([A-Z0-9_]+)["']\s*(?:,\s*mode\s*=\s*["']([A-Z]+)["'])?\s*(?:,\s*description\s*=\s*((?:["'][\s\S]*?["']\s*)+))?\s*\)/g;
@@ -1211,7 +1212,7 @@ export class BigQueryProvider implements SchemaProvider {
   async introspect(opts: { live?: boolean }): Promise<ProviderResult> {
     const warnings: Warning[] = [];
     if (opts.live) {
-      // Live seam: ported `bq` CLI INFORMATION_SCHEMA path from bq-schema.ts.
+      // Live seam: the `bq` CLI INFORMATION_SCHEMA path.
       // Requires BQ_PROJECT_ID/GOOGLE_CLOUD_PROJECT + ambient gcloud auth; not
       // assumed here, so fall back to static and warn.
       warnings.push({
