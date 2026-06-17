@@ -283,22 +283,25 @@ main.terminal-page.sidebar-collapsed .term-item-name {
     direction: rtl; /* keep the meaningful tail of long paths visible */
     text-align: left;
 }
-/* Slide-to-close: a short, minimalist vertical slider pinned to the right of
-   each tab — a white thumb riding a translucent track (the app's --rule token).
-   Top = open, bottom = close (direction:rtl). Reveals on hover/active like the
-   old × did; dragging the thumb to the bottom fires the close in terminal.js. */
+/* Slide-to-close: a short, minimalist vertical slider pinned to the right of each
+   tab — a custom track div + thumb div (no native range / vendor pseudo-elements;
+   role="slider" + keyboard wired in terminal.js). The track is a bordered,
+   translucent capsule; a white thumb rides it from top (open) to bottom (close).
+   Reveals on hover/active like the old × did; the thumb position is driven by the
+   `--f` custom property (0=top … 1=bottom) that the slider logic updates. */
 .term-item-close {
     flex: 0 0 auto;
     align-self: center;
-    width: 18px;
+    position: relative;
+    box-sizing: border-box;
+    width: 16px;
     height: 34px;
     margin: 0 7px 0 0;
-    writing-mode: vertical-lr;
-    direction: rtl; /* top = 100 (open), bottom = 0 (close) */
-    -webkit-appearance: none;
-    appearance: none;
-    background: transparent;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--term-tab-active); /* translucent capsule the thumb travels */
     cursor: ns-resize;
+    touch-action: none; /* let the pointer-drag own the vertical gesture on touch */
     opacity: 0;
     transition: opacity 0.12s ease;
 }
@@ -306,36 +309,27 @@ main.terminal-page.sidebar-collapsed .term-item-name {
 .term-item.active .term-item-close {
     opacity: 1;
 }
-/* The channel the thumb travels: a bordered capsule with a translucent fill. */
-.term-item-close::-webkit-slider-runnable-track {
-    width: 16px;
-    border-radius: 999px;
-    background: var(--term-tab-active);
-    border: 1px solid var(--border);
+.term-item-close:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
 }
-.term-item-close::-moz-range-track {
-    width: 16px;
-    border-radius: 999px;
-    background: var(--term-tab-active);
-    border: 1px solid var(--border);
-}
-.term-item-close::-webkit-slider-thumb {
-    -webkit-appearance: none;
-    appearance: none;
+.term-item-close-thumb {
+    position: absolute;
+    left: 50%;
+    box-sizing: border-box;
     width: 12px;
     height: 12px;
     border-radius: 50%;
     background: #fff;
     border: 1px solid var(--rule);
     box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+    /* top = open, bottom = close; `100% - 12px` is the travel inside the capsule */
+    top: calc(var(--f, 0) * (100% - 12px));
+    transform: translateX(-50%);
+    transition: top 0.14s ease;
 }
-.term-item-close::-moz-range-thumb {
-    width: 12px;
-    height: 12px;
-    border: 1px solid var(--rule);
-    border-radius: 50%;
-    background: #fff;
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+.term-item-close.is-dragging .term-item-close-thumb {
+    transition: none; /* track the finger 1:1 while dragging; snap animates on release */
 }
 
 .term-stage {

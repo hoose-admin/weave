@@ -12,7 +12,7 @@
 const CWD_KEY = "weave.terminal-cwd";
 const COLLAPSED_KEY = "weave.terminal-sidebar-collapsed";
 const POLL_MS = 2500;
-const CLOSE_AT = 6; // slider value (0=bottom … 100=top) at/below which slide-to-close fires
+const CLOSE_AT = 0.94; // close progress (0=top/open … 1=bottom/close) at/above which slide-to-close fires
 
 const mainEl = document.querySelector("main.terminal-page");
 const listEl = document.getElementById("term-list");
@@ -237,28 +237,25 @@ function renderList(sessions) {
         label.append(name, sub);
         label.addEventListener("click", () => activate(s.id));
 
-        // Slide-to-close: a vertical slider that sits at the top; drag the thumb
-        // to the bottom and the tab + terminal close. No prompts — sliding all
-        // the way down IS the confirmation. Released short of the bottom, it
-        // snaps back. stopPropagation keeps the drag from selecting the tab.
-        const closer = document.createElement("input");
-        closer.type = "range";
+        // Slide-to-close: a custom vertical slider (a track div + a thumb div, no
+        // native <input> or vendor pseudo-elements). Drag the thumb to the bottom
+        // and the tab + terminal close — sliding all the way down IS the
+        // confirmation, so no prompt. role="slider" + the keyboard wiring in
+        // wireCloseSlider() keep it operable without a mouse and exposed to AT.
+        const closer = document.createElement("div");
         closer.className = "term-item-close";
-        closer.min = "0";
-        closer.max = "100";
-        closer.value = "100";
+        closer.tabIndex = 0;
         closer.title = "slide down to close";
+        closer.setAttribute("role", "slider");
+        closer.setAttribute("aria-orientation", "vertical");
         closer.setAttribute("aria-label", `slide down to close ${s.title}`);
-        const stop = (e) => e.stopPropagation();
-        closer.addEventListener("pointerdown", stop);
-        closer.addEventListener("click", stop);
-        closer.addEventListener("input", (e) => {
-            e.stopPropagation();
-            if (Number(closer.value) <= CLOSE_AT) closeSession(s.id);
-        });
-        closer.addEventListener("change", () => {
-            if (Number(closer.value) > CLOSE_AT) closer.value = "100"; // didn't reach bottom — snap back
-        });
+        closer.setAttribute("aria-valuemin", "0");
+        closer.setAttribute("aria-valuemax", "100");
+        closer.setAttribute("aria-valuenow", "0");
+        const thumb = document.createElement("div");
+        thumb.className = "term-item-close-thumb";
+        closer.appendChild(thumb);
+        wireCloseSlider(closer, s.id);
 
         li.append(label, closer);
         listEl.appendChild(li);
@@ -391,6 +388,66 @@ async function closeSession(id) {
     if (activeId === id) activeId = null;
     await load();
     if (!activeId && frames.size) activate(frames.keys().next().value);
+}
+
+// Wire one tab's slide-to-close slider. Progress `f` runs 0 (top, open) → 1
+// (bottom, close); CSS positions the thumb from the `--f` custom property.
+// Reaching CLOSE_AT closes the session (once). Operable by pointer drag and by
+// keyboard: ↓/→ and End slide toward close, ↑/←/Home back toward open.
+function wireCloseSlider(el, id) {
+    let f = 0;
+    let closing = false;
+    const clamp = (n) => (n < 0 ? 0 : n > 1 ? 1 : n);
+    const setF = (next) => {
+        f = clamp(next);
+        el.style.setProperty("--f", String(f));
+        el.setAttribute("aria-valuenow", String(Math.round(f * 100)));
+        if (f >= CLOSE_AT && !closing) {
+            closing = true; // fire once — closeSession re-renders and drops this node
+            closeSession(id);
+        }
+    };
+    // Relative drag: progress moves by how far the pointer travels from where it
+    // was pressed, not by absolute position — so a plain click does nothing and
+    // only a deliberate downward slide closes. A full capsule-length drag = 0→1.
+    let startY = 0;
+    let startF = 0;
+    el.addEventListener("pointerdown", (e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        el.setPointerCapture(e.pointerId);
+        el.classList.add("is-dragging"); // disables the thumb's snap transition
+        startY = e.clientY;
+        startF = f;
+    });
+    el.addEventListener("pointermove", (e) => {
+        if (!el.hasPointerCapture(e.pointerId)) return;
+        const h = el.getBoundingClientRect().height;
+        setF(startF + (e.clientY - startY) / h);
+    });
+    const release = () => {
+        if (!el.classList.contains("is-dragging")) return;
+        el.classList.remove("is-dragging");
+        if (!closing) setF(0); // released short of the bottom — snap back to open
+    };
+    el.addEventListener("pointerup", release);
+    el.addEventListener("pointercancel", release);
+    el.addEventListener("click", (e) => e.stopPropagation());
+
+    el.addEventListener("keydown", (e) => {
+        const STEP = 0.2;
+        switch (e.key) {
+            case "ArrowDown":
+            case "ArrowRight": setF(f + STEP); break;
+            case "ArrowUp":
+            case "ArrowLeft": setF(f - STEP); break;
+            case "Home": setF(0); break;
+            case "End": setF(1); break;
+            default: return;
+        }
+        e.preventDefault();
+        e.stopPropagation();
+    });
 }
 
 // ── sidebar drawer ────────────────────────────────────────────────────────────
