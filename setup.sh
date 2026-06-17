@@ -10,6 +10,7 @@ PORT=5174
 PORT_SET=0
 DO_SCAN=1
 DO_START=0
+DO_GITPERMS=0
 TARGET=""
 
 usage() {
@@ -24,14 +25,18 @@ options:
   --no-scan     skip the first-run repo-map + bug-scan skill passes (Claude Code)
   --start       start the dashboard when setup finishes
   --port N      dashboard port (default: 5174)
+  --git-perms   merge weave's git allowlist (commit/push/branch/worktree) into
+                .claude/settings.json — off by default so setup never silently
+                widens your permissions
   -h, --help    show this help
 EOF
 }
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --no-scan) DO_SCAN=0 ;;
-    --start)   DO_START=1 ;;
+    --no-scan)   DO_SCAN=0 ;;
+    --start)     DO_START=1 ;;
+    --git-perms) DO_GITPERMS=1 ;;
     --port)    PORT="${2:?--port needs a value}"; PORT_SET=1; shift ;;
     -h|--help) usage; exit 0 ;;
     -*)        echo "unknown option: $1" >&2; usage; exit 2 ;;
@@ -64,13 +69,17 @@ echo "→ vendoring dashboard into $TARGET/.weave"
 mkdir -p "$TARGET/.weave"
 rsync -a --exclude 'cache' --exclude 'node_modules' "$SCRIPT_DIR/app/.weave/" "$TARGET/.weave/"
 
-# ── 2. install skills + hooks, merge settings ────────────────────────────────
-echo "→ installing skills + hooks + commands into $TARGET/.claude"
+# ── 2. install skills + hooks, merge settings (upgrade-safe) ─────────────────
+#    install-payload.ts records every file weave writes in .weave/install-manifest.json,
+#    so a re-run can tell its own stale copy from YOUR customization: new files install,
+#    untouched ones update, customized ones are KEPT (weave's copy staged as *.weave-incoming).
+#    No blind overwrite, no reliance on you having committed .claude/ first.
+echo "→ installing skills + hooks + commands into $TARGET/.claude (upgrade-safe)"
 mkdir -p "$TARGET/.claude/skills" "$TARGET/.claude/hooks" "$TARGET/.claude/commands"
-rsync -a "$SCRIPT_DIR/skills/" "$TARGET/.claude/skills/"
-rsync -a "$SCRIPT_DIR/hooks/"  "$TARGET/.claude/hooks/"
-rsync -a "$SCRIPT_DIR/commands/" "$TARGET/.claude/commands/"  # vendored /security-review engine
-bun "$SCRIPT_DIR/scripts/merge-settings.ts" "$SCRIPT_DIR/settings.template.json" "$TARGET/.claude/settings.json"
+bun "$SCRIPT_DIR/scripts/install-payload.ts" "$SCRIPT_DIR" "$TARGET"
+PERMS_FLAG=""
+[ "$DO_GITPERMS" = 1 ] && PERMS_FLAG="--git-perms"
+bun "$SCRIPT_DIR/scripts/merge-settings.ts" "$SCRIPT_DIR/settings.template.json" "$TARGET/.claude/settings.json" $PERMS_FLAG
 
 # ── 3. scaffold the .tickets board ───────────────────────────────────────────
 echo "→ scaffolding .tickets board (9 buckets + ADRs)"
@@ -124,8 +133,12 @@ cat <<EOF
     source "$TARGET/.weave/wt.sh"   # add this line to ~/.zshrc to keep it
     wt <name>                       # isolated worktree on branch wt/<name>, then claude
     wt ls / wt rm <name>            # list / remove worktrees
-  (weave's settings.template granted claude git push/branch/commit/worktree perms.)
 EOF
+if [ "$DO_GITPERMS" = 1 ]; then
+  echo "  (weave granted claude git push/branch/commit/worktree perms — see .claude/settings.json.)"
+else
+  echo "  (git perms NOT granted — re-run with --git-perms to let wt sessions push unprompted.)"
+fi
 if [ "$DO_SCAN" != 1 ] || [ "$HAVE_CLAUDE" != 1 ]; then
   cat <<'EOF'
 

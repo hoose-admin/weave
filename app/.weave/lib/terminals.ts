@@ -21,7 +21,7 @@ import { homedir } from "node:os";
 import { REPO_ROOT } from "../weave.config.ts";
 
 const CACHE_DIR = join(import.meta.dir, "..", "cache", "terminals");
-// Per-terminal "live" status files written by the terminal_live.ts hook (state,
+// Per-terminal "live" status files written by the weave_terminal_live.ts hook (state,
 // summary, pending notification). A subdir of CACHE_DIR so its `<id>.json` files
 // never collide with the session records readAllRecords() scans there.
 const LIVE_DIR = join(CACHE_DIR, "live");
@@ -222,7 +222,7 @@ async function applySessionOptions(tmuxName: string): Promise<void> {
   }
 }
 
-// Tell the terminal_live.ts hook which weave terminal it's running in, and where
+// Tell the weave_terminal_live.ts hook which weave terminal it's running in, and where
 // to write the live status file. Set in the tmux *session environment* (not just
 // the dashboard's process env): it lives in the tmux server, so every program
 // launched in the session — the shell, `claude`, and the hooks `claude` spawns —
@@ -252,7 +252,7 @@ export type TermLive = {
   notification?: { type: string; message: string; id: string; at: string } | null;
 };
 
-// Read the live status the terminal_live.ts hook keeps for a session, or null
+// Read the live status the weave_terminal_live.ts hook keeps for a session, or null
 // when there's no Claude/hook activity (the server then falls back to scraping).
 export async function readLive(id: string): Promise<TermLive | null> {
   try {

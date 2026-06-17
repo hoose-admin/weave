@@ -40,11 +40,15 @@ Claude Code is installed) a backlog of real findings from your code.
 ## What `setup.sh` does
 
 1. **Vendors the app** — copies the Bun dashboard into `your-repo/.weave/`.
-2. **Installs the skills + hook + commands** into `your-repo/.claude/`, merging
-   weave's hooks **and a git permission allowlist** into any existing
-   `.claude/settings.json` (idempotent, non-destructive — your own rules are kept).
-   Commands include the vendored, stack-agnostic `/security-review` engine (MIT)
-   that the `security` skill wraps.
+2. **Installs the skills + hooks + commands** into `your-repo/.claude/`,
+   **upgrade-safe**: a manifest (`.weave/install-manifest.json`) records every file
+   weave writes, so a re-run installs new files, updates ones you haven't touched, and
+   **keeps any you've customized** — weave's copy is staged beside it as `*.weave-incoming`,
+   never applied. Weave's hooks are namespaced (`weave_*.ts`) and skipped if you already
+   run an equivalent hook, so nothing double-fires. Settings merge idempotently; the git
+   permission allowlist is **opt-in** (`--git-perms`) so setup never silently widens your
+   permissions. Commands include the vendored, stack-agnostic `/security-review` engine
+   (MIT) that the `security` skill wraps.
 3. **Scaffolds the board** — `your-repo/.tickets/` with the 9 lifecycle buckets
    and an `ADRs/` folder.
 4. **Writes `weave.config.json`** and a starter `CLAUDE.md` (only if you don't
@@ -55,7 +59,7 @@ Claude Code is installed) a backlog of real findings from your code.
    backlog. The board is populated by *your* code from minute one.
 
 Flags: `--no-scan` (skip step 6), `--start` (launch the board at the end),
-`--port N`.
+`--port N`, `--git-perms` (opt into weave's git allowlist — see below).
 
 > The headless bug-scan pass (`claude -p …`) is best-effort. If it doesn't fully
 > complete under your permission settings, just run it interactively in Claude
@@ -108,7 +112,7 @@ heuristic, while the summaries call the Anthropic API (Haiku).
 > the localhost-only dashboard.
 >
 > **Status, summaries, and notifications are 100% local.** When Claude Code runs
-> in a weave terminal, a hook (`terminal_live.ts`) writes its state, a few-word
+> in a weave terminal, a hook (`weave_terminal_live.ts`) writes its state, a few-word
 > summary of your last prompt, and any pending permission/idle prompt to a local
 > file the dashboard reads — no API key, nothing leaves your machine. Terminals
 > without the hook fall back to a local status dot inferred from the tmux pane.
@@ -141,9 +145,11 @@ Worktrees live in a sibling dir (`<repo>-worktrees/<name>`) so they stay out of
 weave's graph/dashboard scans, and gitignored `node_modules` are symlinked in so
 the vendored dashboard runs immediately in the new tree.
 
-To let those sessions push, setup also merges a git permission allowlist
-(`push` / `branch` / `commit` / `worktree`, plus a best-effort `--force`/`-f`
-push guard) into `<repo>/.claude/settings.json`. The force-push deny is a speed
+To let those sessions push, run setup with `--git-perms` and it merges a git
+permission allowlist (`push` / `branch` / `commit` / `worktree`, plus a best-effort
+`--force`/`-f` push guard) into `<repo>/.claude/settings.json`. **It is off by
+default** — setup never widens your permission surface unless you ask; without the
+flag it just prints the allowlist it would have added. The force-push deny is a speed
 bump, not a wall — Claude Code matches permission patterns by command prefix, so
 reordered flags (`git push origin main --force`) slip past it. Edit or delete any
 of these rules in that file if you'd rather Claude not run git unprompted.
@@ -168,9 +174,10 @@ of these rules in that file if you'd rather Claude not run git unprompted.
 ```
 weave/
 ├── setup.sh                 # the installer
-├── settings.template.json   # hooks + git permission allowlist, merged into the target's .claude/settings.json
+├── settings.template.json   # namespaced hooks + (opt-in) git allowlist, merged into the target's .claude/settings.json
 ├── CLAUDE.template.md        # starter project instructions copied into the target
-├── scripts/merge-settings.ts # merges template hooks + permissions (idempotent)
+├── scripts/install-payload.ts # upgrade-safe skills/hooks/commands install (manifest + conflict staging)
+├── scripts/merge-settings.ts  # merges template hooks + (opt-in) permissions, with a double-fire guard
 ├── app/.weave/              # the Bun dashboard, vendored into <target>/.weave
 │   ├── server.ts            # Bun.serve + REST API + static serving
 │   ├── weave.config.ts      # path/port resolver (env + weave.config.json overrides)
@@ -180,7 +187,9 @@ weave/
 │   └── scripts/ticket-cli.ts# next-id / audit-ids / create (headless ticket filing)
 ├── skills/                  # installed into <target>/.claude/skills
 ├── commands/                # vendored /security-review engine → <target>/.claude/commands
-└── hooks/skill_reflect.ts   # installed into <target>/.claude/hooks (runs on Bun)
+└── hooks/                   # installed into <target>/.claude/hooks (Bun-run, namespaced)
+    ├── weave_skill_reflect.ts # end-of-turn skill/script self-reflection
+    └── weave_terminal_live.ts # per-terminal live status for the dashboard
 ```
 
 ## Configuration

@@ -143,7 +143,7 @@ function activate(id) {
 
 // A non-modal card pinned to the upper-right of the stage, showing what the
 // ACTIVE terminal's Claude is waiting on (a permission or idle prompt, surfaced
-// by the terminal_live.ts hook). The LAYER is pointer-events:none so clicks and
+// by the weave_terminal_live.ts hook). The LAYER is pointer-events:none so clicks and
 // keystrokes pass straight through to the ttyd iframe — only the card itself is
 // interactive — so you can answer the prompt by typing in the terminal with the
 // card still up. It stays until dismissed; dismissal is keyed on

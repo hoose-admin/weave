@@ -905,7 +905,7 @@ const server = Bun.serve({
     // it via <iframe>. Persistence across reconnects/restarts comes from tmux.
     if (pathname === "/api/terminals" && req.method === "GET") {
       // Enrich each session with its live status + summary + pending notification.
-      // The source of truth is the terminal_live.ts hook (written per session to
+      // The source of truth is the weave_terminal_live.ts hook (written per session to
       // cache/terminals/live/<id>.json) — it knows what Claude is doing without
       // scraping or any API. Terminals with no hook data (a plain shell, or a
       // claude started before the hook env was set) fall back to a status inferred

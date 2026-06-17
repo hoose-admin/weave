@@ -1,7 +1,7 @@
 // Fallback live-status detection for terminal tabs.
 //
 // The dashboard's primary source of "what is this session doing" is the
-// terminal_live.ts hook (state + summary written to cache/terminals/live/). This
+// weave_terminal_live.ts hook (state + summary written to cache/terminals/live/). This
 // module is the FALLBACK for terminals with no hook data — a plain shell, or a
 // `claude` started before the hook env was set. weave knows each session's tmux
 // name, so it reads the screen with `tmux capture-pane` and infers a coarse
