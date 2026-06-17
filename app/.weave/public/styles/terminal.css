@@ -1,0 +1,480 @@
+/* ── Terminal tab ──────────────────────────────────────────────────────
+   Master-detail layout: a session list on the left, the active ttyd
+   session embedded via <iframe> on the right. The body becomes a flex
+   column so the stage fills the viewport below the sticky navbar without
+   hardcoding its height. All colours come from the themed CSS variables,
+   so light/dark are handled automatically. */
+body.terminal-page {
+    display: flex;
+    flex-direction: column;
+    height: 100dvh;
+    margin: 0;
+    overflow: hidden;
+}
+main.terminal-page {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: grid;
+    grid-template-columns: 276px minmax(0, 1fr);
+}
+/* Collapsed: the sidebar shrinks to a narrow icon rail — the chevron, a square
+   "+" to open a terminal, and one numbered square per session to switch between
+   them. The chevron expands it again. */
+main.terminal-page.sidebar-collapsed {
+    grid-template-columns: 52px minmax(0, 1fr);
+}
+
+/* Control area, stacked: [ working dir ...... ][ save ] on top, then
+   [ + Terminal ] below. `save` and `+ Terminal` share `.term-btn` so they
+   look identical. */
+.term-bar {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--rule);
+    background: var(--paper);
+}
+.term-cwd-form {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.term-cwd-form input {
+    flex: 1 1 auto;
+    min-width: 0;
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    padding: 6px 9px;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    background: var(--bg);
+    color: var(--ink);
+}
+.term-cwd-form input:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--focus);
+}
+.term-btn {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    height: 30px;
+    padding: 0 12px;
+    font-family: var(--font-mono);
+    font-size: 0.82rem;
+    line-height: 1;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--ink);
+    cursor: pointer;
+}
+.term-btn:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+}
+.term-bar-row2 {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.term-cwd-saved {
+    flex: 0 0 auto;
+    color: var(--green);
+    font-size: 0.78rem;
+    white-space: nowrap;
+}
+
+/* Left panel: control bar (top) + session list (scrolls). The bar — and thus
+   the working-dir input — is exactly the width of this panel; the iframe stage
+   takes the rest of the row at full height. */
+.term-sidebar {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    border-right: 1px solid var(--rule);
+    background: var(--paper);
+}
+
+/* Drawer header — holds the collapse chevron. Stays visible in both states,
+   so when the panel is a thin rail the chevron is still there to reopen it. */
+.term-sidebar-head {
+    flex: 0 0 auto;
+    display: flex;
+    justify-content: flex-end;
+    padding: 6px;
+    border-bottom: 1px solid var(--rule);
+}
+.term-collapse {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    padding: 0;
+    border: 0;
+    border-radius: 6px;
+    background: var(--accent);
+    color: var(--bg);
+    cursor: pointer;
+    line-height: 1;
+}
+.term-collapse:hover {
+    filter: brightness(1.08);
+}
+.term-collapse-icon {
+    font-size: 1.05rem;
+    transition: transform 0.15s ease;
+}
+/* Open: chevron points left (collapse). Collapsed: flip to point right (expand)
+   and hide the panel contents so only the rail + chevron remain. */
+main.terminal-page.sidebar-collapsed .term-collapse-icon {
+    transform: rotate(180deg);
+}
+main.terminal-page.sidebar-collapsed .term-sidebar-head {
+    justify-content: center;
+    border-bottom: 0;
+    padding: 8px 0 4px;
+}
+
+/* Collapsed control bar: drop the cwd form / labels, keep just a square "+". */
+main.terminal-page.sidebar-collapsed .term-bar {
+    padding: 4px 0 6px;
+    border-bottom: 0;
+    align-items: center;
+}
+main.terminal-page.sidebar-collapsed .term-cwd-form,
+main.terminal-page.sidebar-collapsed .term-cwd-saved,
+main.terminal-page.sidebar-collapsed .term-error,
+main.terminal-page.sidebar-collapsed .term-new-text {
+    display: none;
+}
+main.terminal-page.sidebar-collapsed .term-bar-row2 {
+    width: 100%;
+    justify-content: center;
+}
+main.terminal-page.sidebar-collapsed #term-new {
+    width: 36px;
+    height: 36px;
+    padding: 0;
+    font-size: 1.3rem;
+}
+
+/* Collapsed session list: each tab becomes a numbered square you click to
+   switch to it. The live status dot rides in the corner; idle dots stay hidden
+   (their default), so a quiet terminal is just its number. */
+main.terminal-page.sidebar-collapsed .term-list {
+    align-items: center;
+    padding: 4px;
+    gap: 4px;
+    counter-reset: term;
+}
+main.terminal-page.sidebar-collapsed .term-item {
+    counter-increment: term;
+    width: 36px;
+    border-radius: 8px;
+}
+main.terminal-page.sidebar-collapsed .term-item.active {
+    box-shadow: inset 0 0 0 1.5px var(--accent);
+}
+main.terminal-page.sidebar-collapsed .term-item-label {
+    position: relative;
+    flex-direction: row;
+    align-items: center;
+    justify-content: center;
+    height: 34px;
+    padding: 0;
+}
+main.terminal-page.sidebar-collapsed .term-item-label::before {
+    content: counter(term);
+    font-size: 0.85rem;
+    font-weight: 600;
+}
+main.terminal-page.sidebar-collapsed
+    .term-item.active
+    .term-item-label::before {
+    color: var(--accent);
+}
+main.terminal-page.sidebar-collapsed .term-item-cwd,
+main.terminal-page.sidebar-collapsed .term-item-title,
+main.terminal-page.sidebar-collapsed .term-item-dead,
+main.terminal-page.sidebar-collapsed .term-item-close {
+    display: none;
+}
+main.terminal-page.sidebar-collapsed .term-item-name {
+    position: absolute;
+    top: 3px;
+    right: 3px;
+    gap: 0;
+}
+.term-error {
+    margin: 0;
+    color: var(--red);
+    font-size: 0.75rem;
+    word-break: break-word;
+}
+
+.term-list {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    list-style: none;
+    margin: 0;
+    padding: 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+.term-item {
+    display: flex;
+    align-items: stretch;
+    border-radius: 6px;
+    overflow: hidden;
+}
+.term-item:hover {
+    background: var(--term-tab-hover);
+}
+.term-item.active {
+    background: var(--term-tab-active);
+}
+.term-item-label {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    padding: 7px 8px;
+    border: 0;
+    background: none;
+    text-align: left;
+    cursor: pointer;
+    color: var(--ink);
+    font-family: var(--font-mono);
+}
+.term-item-name {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 0.82rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.term-item.active .term-item-name {
+    color: var(--accent);
+}
+.term-item-dead {
+    color: var(--yellow);
+    font-size: 0.72rem;
+}
+.term-item-cwd {
+    font-size: 0.68rem;
+    color: var(--muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    direction: rtl; /* keep the meaningful tail of long paths visible */
+    text-align: left;
+}
+/* Slide-to-close: a short, minimalist vertical slider pinned to the right of
+   each tab — a white thumb riding a translucent track (the app's --rule token).
+   Top = open, bottom = close (direction:rtl). Reveals on hover/active like the
+   old × did; dragging the thumb to the bottom fires the close in terminal.js. */
+.term-item-close {
+    flex: 0 0 auto;
+    align-self: center;
+    width: 18px;
+    height: 34px;
+    margin: 0 7px 0 0;
+    writing-mode: vertical-lr;
+    direction: rtl; /* top = 100 (open), bottom = 0 (close) */
+    -webkit-appearance: none;
+    appearance: none;
+    background: transparent;
+    cursor: ns-resize;
+    opacity: 0;
+    transition: opacity 0.12s ease;
+}
+.term-item:hover .term-item-close,
+.term-item.active .term-item-close {
+    opacity: 1;
+}
+/* The channel the thumb travels: a bordered capsule with a translucent fill. */
+.term-item-close::-webkit-slider-runnable-track {
+    width: 16px;
+    border-radius: 999px;
+    background: var(--term-tab-active);
+    border: 1px solid var(--border);
+}
+.term-item-close::-moz-range-track {
+    width: 16px;
+    border-radius: 999px;
+    background: var(--term-tab-active);
+    border: 1px solid var(--border);
+}
+.term-item-close::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: #fff;
+    border: 1px solid var(--rule);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+}
+.term-item-close::-moz-range-thumb {
+    width: 12px;
+    height: 12px;
+    border: 1px solid var(--rule);
+    border-radius: 50%;
+    background: #fff;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+}
+
+.term-stage {
+    position: relative;
+    min-width: 0;
+    background: var(--bg);
+}
+.term-frame {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    border: 0;
+}
+.term-frame[hidden] {
+    display: none;
+}
+.term-empty {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 1rem;
+    text-align: center;
+    color: var(--muted);
+}
+.term-empty p {
+    margin: 0;
+}
+.term-empty-hint {
+    font-size: 0.85rem;
+}
+.term-empty code {
+    font-family: var(--font-mono);
+    padding: 1px 5px;
+    border-radius: 4px;
+    background: var(--paper-2);
+    color: var(--ink);
+}
+
+/* ── Terminal notification overlay ──────────────────────────────────────────
+   A dismissible card over the active terminal showing what its Claude is
+   waiting on. The layer ignores pointer events so clicks/keystrokes reach the
+   ttyd iframe underneath (you can keep typing); only the card is interactive. */
+.term-notif-layer {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    z-index: 5;
+    pointer-events: none;
+    max-width: min(360px, 60%);
+}
+.term-notif-card {
+    pointer-events: auto;
+    display: flex;
+    gap: 8px;
+    align-items: flex-start;
+    padding: 10px 12px;
+    background: var(--paper);
+    border: 1px solid var(--rule);
+    border-left: 3px solid var(--red);
+    border-radius: 8px;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
+    font-family: var(--font-mono);
+}
+.term-notif-msg {
+    margin: 0;
+    font-size: 0.8rem;
+    line-height: 1.35;
+    color: var(--ink);
+}
+.term-notif-dismiss {
+    flex: 0 0 auto;
+    border: 0;
+    background: none;
+    cursor: pointer;
+    padding: 0 2px;
+    font-size: 1rem;
+    line-height: 1;
+    color: var(--muted);
+}
+.term-notif-dismiss:hover {
+    color: var(--red);
+}
+
+@media (max-width: 640px) {
+    main.terminal-page {
+        grid-template-columns: 184px minmax(0, 1fr);
+    }
+}
+
+/* Per-tab live status dot (working / needs-you / idle) + AI summary line.
+   Sits as the first child of .term-item-name (which is flex, gap 5px). */
+.term-status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    background: var(--muted);
+}
+.term-status-dot.is-idle {
+    display: none;
+}
+.term-status-dot.is-working {
+    background: var(--yellow);
+    animation: weave-pulse 1.2s ease-in-out infinite;
+}
+.term-status-dot.is-attention {
+    background: var(--red);
+    animation: weave-pulse 1s ease-in-out infinite;
+}
+.term-status-dot.is-done {
+    background: var(--green);
+}
+.term-item-title {
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+/* When the sub-line shows the AI summary instead of the cwd: read left-to-right
+   (the cwd line is rtl to keep path tails visible) and set it apart. */
+.term-item-cwd.is-summary {
+    direction: ltr;
+    text-align: left;
+    font-style: italic;
+    color: var(--ink);
+    opacity: 0.75;
+}
+
+@keyframes weave-pulse {
+    0%,
+    100% {
+        opacity: 1;
+        transform: scale(1);
+    }
+    50% {
+        opacity: 0.4;
+        transform: scale(0.65);
+    }
+}

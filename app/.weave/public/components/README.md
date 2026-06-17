@@ -61,6 +61,24 @@ implementation; every page module imports from here. Returns a string.
 `formatBytes(n)` — render a byte count as `"N B"` / `"N.M KB"` / `"N.M MB"`
 with one decimal at KB/MB scale. Pure function, no DOM access.
 
+### `theme.js`
+
+Self-init dark/light toggle. Reads/persists `weave-theme` in localStorage,
+flips `data-theme` on `<html>`, and broadcasts `weave:theme-changed` so
+Cytoscape views recolor. Loaded once per page; no exports.
+
+### `navbar-search.js`
+
+Self-init ticket search. Finds `#navbar-search` / `#navbar-search-results`
+(rendered by the shared `weave:navbar`) and wires live id/title search over
+`/api/tickets`.
+
+### `howto.js`
+
+Self-init wiring for the `weave:howto-modal` partial — finds the help (`?`)
+button and `#howto-modal` (both from the shared navbar) and handles
+open/close/Escape. No exports.
+
 ## Server-side partials
 
 Not every shared chunk needs to be a client-side ES module. Page chrome
@@ -93,8 +111,8 @@ used by `ticket.html`) adds the `#status` save-indicator slot read by
 
 The shared how-to modal. Source markup is `.weave/public/howto-modal.html`,
 injected by `renderHowtoModal()` in `.weave/server.ts`. Open/close/Escape
-wiring lives in the self-init `howto.js` module (loaded on every page); the
-help button itself is part of `weave:navbar`.
+wiring lives in the self-init `components/howto.js` module (loaded on every
+page); the help button itself is part of `weave:navbar`.
 
 Markup contract:
 
