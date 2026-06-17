@@ -32,7 +32,6 @@ Domains default to `app | infra | docs | meta` — rename them for your repo.
 | Skill | What it does |
 |---|---|
 | `ticket-manager` | Owns the `.tickets/` lifecycle (create / refine / build / test / validate / link). |
-| `repo-map` | Introspects this repo and writes the codebase graph at `/graphs/repo-map`. |
 | `bug-scan` | Multi-agent bug hunt → files verified findings as backlog tickets. |
 | `adr-manager` / `adr-researcher` | Create and research Architecture Decision Records (`.tickets/ADRs/`). |
 | `security` (+ frontend/backend/gcp) | Read-only security audits → P0/P1/P2 punch lists. |
@@ -45,7 +44,7 @@ cd .weave && bun run start     # http://127.0.0.1:5174
 ```
 
 Board (drag tickets between buckets), ticket editor, ADRs, and graph views
-(`repo-map`, `tickets`, `skills`, `ai`). No database, no build step — files on
+(`tickets`, `dataflow`, `ai`, `schemas`). No database, no build step — files on
 disk are the source of truth. The dashboard never runs git.
 
 ---

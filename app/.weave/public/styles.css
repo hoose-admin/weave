@@ -1936,6 +1936,45 @@ textarea {
 [data-theme="dark"] .legend .ln.ai-lists      { border-top-color: #a6e3a1; }
 [data-theme="dark"] .legend .ln.ai-configures { border-top-color: #9a9285; }
 [data-theme="dark"] .legend .ln.ai-overrides  { border-top-color: #cba6f7; }
+
+/* ── dataflow swatches — frontend route → container · endpoint → store ── */
+.legend .sw.fe              { background: var(--paper); border-color: var(--ink); }
+.legend .sw.container       { background: #f4efe2; border-color: var(--muted); }
+.legend .sw.endpoint        { background: var(--swatch-api-fill); border-color: var(--mauve); }
+.legend .sw.endpoint-api    { background: var(--swatch-analytics-fill); border-color: var(--blue); }
+.legend .sw.store-firestore { background: var(--swatch-specialized-fill); border-color: var(--green); }
+.legend .sw.store-sql       { background: var(--swatch-sql-fill); border-color: var(--yellow); }
+.legend .sw.store-bq        { background: var(--swatch-bq-fill); border-color: var(--peach); }
+[data-theme="dark"] .legend .sw.container { background: #28251f; }
+.legend .ln.fetch        { border-top-color: var(--muted); opacity: 0.6; }
+.legend .ln.fetch-cached { border-top-color: var(--blue); border-top-width: 2px; }
+.legend .ln.hosts        { border-top: 1.2px dotted var(--muted); opacity: 0.6; }
+.legend .ln.reads        { border-top: 1.5px dashed var(--peach); }
+.legend .ln.writes       { border-top: 2px solid var(--red); }
+
+/* ── schemas swatches — tables coloured per database ── */
+.legend .sw.db-firestore  { background: #dceedb; border-color: #40a02b; }
+.legend .sw.db-sql        { background: #fdf0c8; border-color: #df8e1d; }
+.legend .sw.db-bigquery   { background: #fde0cf; border-color: #fe640b; }
+.legend .sw.db-matview    { background: var(--paper); border-color: var(--muted); border-style: dashed; }
+.legend .sw.schema-column { background: #faf8f3; border-color: #9a9285; border-radius: 50%; }
+[data-theme="dark"] .legend .sw.db-firestore  { background: #2a4226; border-color: #a6e3a1; }
+[data-theme="dark"] .legend .sw.db-sql        { background: #4a3a1a; border-color: #f9e2af; }
+[data-theme="dark"] .legend .sw.db-bigquery   { background: #4a2e1a; border-color: #fab387; }
+[data-theme="dark"] .legend .sw.schema-column { background: #211e1a; border-color: #9a9285; }
+.legend .ln.schema-subcollection { border-top: 1.4px dotted #40a02b; }
+.legend .ln.schema-references    { border-top: 1.6px solid #8839ef; }
+.legend .ln.schema-joins         { border-top: 1.5px solid #179299; }
+[data-theme="dark"] .legend .ln.schema-subcollection { border-top-color: #a6e3a1; }
+[data-theme="dark"] .legend .ln.schema-references    { border-top-color: #cba6f7; }
+[data-theme="dark"] .legend .ln.schema-joins         { border-top-color: #94e2d5; }
+
+/* ── schemas field inspector (left-anchored card opened by clicking a node) ── */
+.bq-inspector .bqi-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+.bq-inspector .bqi-kind { text-transform: uppercase; font-size: 9px; letter-spacing: 0.5px; color: var(--muted); }
+.bq-inspector .bqi-close { background: none; border: none; color: var(--muted); font-size: 16px; line-height: 1; cursor: pointer; padding: 0 2px; }
+.bq-inspector .bqi-close:hover { color: var(--ink); }
+
 .legend .hint {
     margin: 8px 0 0;
     padding-top: 8px;

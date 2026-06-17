@@ -14,7 +14,7 @@ async function loadDomains() {
   const list = $("#domain-list");
   try {
     const domains = await fetch("/api/domains").then((r) => r.json());
-    list.innerHTML = domains.map((d) => `<option value="${d}">`).join("");
+    list.innerHTML = domains.map((d) => `<option value="${escapeHtml(d)}">`).join("");
   } catch { /* leave empty — input still accepts free text */ }
 }
 

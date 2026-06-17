@@ -3,7 +3,7 @@
 // implementation; don't redefine it per page.
 
 export function escapeHtml(s) {
-  return String(s).replace(
+  return String(s ?? "").replace(
     /[&<>"']/g,
     (c) =>
       ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[

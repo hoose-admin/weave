@@ -5,6 +5,11 @@
   "type": "module",
   "scripts": {
     "start": "bun --hot server.ts",
-    "build:graphs": "bun lib/graphs/build-all.ts"
+    "build:graphs": "bun lib/graphs/build-all.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.6.0"
   }
 }

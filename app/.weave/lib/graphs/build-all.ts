@@ -1,8 +1,8 @@
 import { join } from "node:path";
 import { mkdir, writeFile } from "node:fs/promises";
 import { buildTicketGraph } from "./tickets.ts";
-import { buildRepoMapGraph } from "./repo-map.ts";
-import { buildSkillGraph } from "./skills.ts";
+import { buildDataflowGraph } from "./dataflow.ts";
+import { buildSchemasGraph } from "./schemas.ts";
 import { buildAdrGraph } from "./adrs.ts";
 import { buildAiGraph } from "./ai.ts";
 
@@ -12,8 +12,8 @@ async function main() {
   await mkdir(CACHE, { recursive: true });
   for (const [name, builder] of [
     ["tickets",  buildTicketGraph],
-    ["repo-map", buildRepoMapGraph],
-    ["skills",   buildSkillGraph],
+    ["dataflow", buildDataflowGraph],
+    ["schemas",  buildSchemasGraph],
     ["adrs",     buildAdrGraph],
     ["ai",       buildAiGraph],
   ] as const) {

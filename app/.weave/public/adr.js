@@ -684,6 +684,12 @@ function renderMarkdown(md) {
   return out.join("\n");
 }
 
+// Schemes safe to place in an href. Anything else (javascript:, data:,
+// vbscript:, …) renders as plain label text so a crafted ADR body can't run
+// script when a link is clicked. The href is already escapeHtml'd, so quotes
+// can't break the attribute — this guards the scheme.
+const SAFE_HREF_RE = /^(?:https?:\/\/|mailto:|\/|#|\.{1,2}\/)/i;
+
 function inlineMd(s) {
   let out = escapeHtml(s);
   // bold
@@ -692,8 +698,12 @@ function inlineMd(s) {
   out = out.replace(/(^|[^*])\*([^*\s][^*]*?)\*/g, "$1<em>$2</em>");
   // code
   out = out.replace(/`([^`]+)`/g, "<code>$1</code>");
-  // links
-  out = out.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
+  // links — only emit an anchor for a safe-scheme href; otherwise drop to the
+  // bare label text.
+  out = out.replace(
+    /\[([^\]]+)\]\(([^)]+)\)/g,
+    (_m, label, href) => (SAFE_HREF_RE.test(href.trim()) ? `<a href="${href}">${label}</a>` : label),
+  );
   return out;
 }
 

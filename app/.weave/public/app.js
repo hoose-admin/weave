@@ -1,6 +1,8 @@
 // Kanban board. One horizontal Scratch Pad row above six lifecycle columns;
 // archive lazy-loaded.
 
+import { escapeHtml as esc } from "/components/html-utils.js";
+
 // ── Sort state ─────────────────────────────────────────────────────────────
 let sortKey = "id";
 let sortDir = "asc";
@@ -249,12 +251,6 @@ function insertionIndexFor(list, draggedCard, clientY) {
 
 function cssClass(s) {
   return String(s).replace(/[^a-zA-Z0-9-]/g, "-");
-}
-function esc(s) {
-  return String(s).replace(
-    /[<>&]/g,
-    (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" })[c],
-  );
 }
 
 // Custom floating tooltip for list-mode rows. One singleton element shared
@@ -601,7 +597,7 @@ async function loadDomainSuggestions() {
   if (!list || list.dataset.loaded === "1") return;
   try {
     const domains = await fetch("/api/domains").then((r) => r.json());
-    list.innerHTML = domains.map((d) => `<option value="${d}">`).join("");
+    list.innerHTML = domains.map((d) => `<option value="${esc(d)}">`).join("");
     list.dataset.loaded = "1";
   } catch { /* leave empty */ }
 }

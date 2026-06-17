@@ -6,6 +6,8 @@
 // fetches `/api/buckets` on first focus. Archive (`7-archive/`) is
 // excluded — search sees backlog → complete.
 
+import { escapeHtml as esc } from "/components/html-utils.js";
+
 const MAX_RESULTS = 8;
 
 let cached = null;           // flat array of ticket summaries
@@ -92,10 +94,6 @@ function search(tickets, raw) {
     return an - bn;
   });
   return scored.slice(0, MAX_RESULTS).map((x) => x.t);
-}
-
-function esc(s) {
-  return String(s).replace(/[<>&]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" })[c]);
 }
 
 function cssClass(s) {

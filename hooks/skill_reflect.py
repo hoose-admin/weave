@@ -79,7 +79,11 @@ def _line_count(path: str) -> int:
 
 
 def _turn_was_substantive(path: str, start: int) -> bool:
-    """True if any assistant tool_use since `start` line was a file edit or a Bash op."""
+    """True if any assistant tool_use since `start` line was a file edit (Edit/Write/MultiEdit/NotebookEdit).
+
+    File edits are the deliberate "did substantive work" signal; Bash-only turns
+    (git status, grep, tests) intentionally do NOT count, so the wrap-up stays quiet.
+    """
     try:
         lines = Path(path).read_text(errors="ignore").splitlines()
     except Exception:

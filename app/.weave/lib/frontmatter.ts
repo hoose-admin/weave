@@ -90,11 +90,23 @@ export function parse(raw: string): ParsedFile {
 }
 
 function stripScalar(s: string): string {
-  s = s.replace(/\s+#.*$/, "").trim();
-  if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) {
-    return s.slice(1, -1);
+  s = s.trim();
+  // Quoted scalar: read to the matching closing quote so a '#' inside the
+  // value stays literal (it is NOT a comment), and any trailing " # comment"
+  // after the close is dropped. Double-quoted values honor backslash escapes.
+  const q = s[0];
+  if (q === '"' || q === "'") {
+    let out = "";
+    for (let i = 1; i < s.length; i++) {
+      const c = s[i];
+      if (q === '"' && c === "\\" && i + 1 < s.length) { out += s[i + 1]; i++; continue; }
+      if (c === q) return out;
+      out += c;
+    }
+    // Unterminated quote — fall through to bare handling.
   }
-  return s;
+  // Unquoted scalar: a whitespace-prefixed '#' starts a trailing comment.
+  return s.replace(/\s+#.*$/, "").trim();
 }
 
 // Serialize back. Keys appear in this order; unknown keys appended after.

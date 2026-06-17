@@ -7,6 +7,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 PORT=5174
+PORT_SET=0
 DO_SCAN=1
 DO_START=0
 TARGET=""
@@ -31,7 +32,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --no-scan) DO_SCAN=0 ;;
     --start)   DO_START=1 ;;
-    --port)    PORT="${2:?--port needs a value}"; shift ;;
+    --port)    PORT="${2:?--port needs a value}"; PORT_SET=1; shift ;;
     -h|--help) usage; exit 0 ;;
     -*)        echo "unknown option: $1" >&2; usage; exit 2 ;;
     *)         if [ -z "$TARGET" ]; then TARGET="$1"; else echo "unexpected arg: $1" >&2; exit 2; fi ;;
@@ -61,7 +62,7 @@ echo "    port:   $PORT"
 # ── 1. vendor the dashboard app ──────────────────────────────────────────────
 echo "→ vendoring dashboard into $TARGET/.weave"
 mkdir -p "$TARGET/.weave"
-rsync -a --exclude 'cache' "$SCRIPT_DIR/app/.weave/" "$TARGET/.weave/"
+rsync -a --exclude 'cache' --exclude 'node_modules' "$SCRIPT_DIR/app/.weave/" "$TARGET/.weave/"
 
 # ── 2. install skills + hooks, merge settings ────────────────────────────────
 echo "→ installing skills + hooks into $TARGET/.claude"
@@ -81,6 +82,8 @@ done
 if [ ! -e "$TARGET/weave.config.json" ]; then
   printf '{\n  "repoRoot": ".",\n  "ticketsRoot": ".tickets",\n  "port": %s\n}\n' "$PORT" > "$TARGET/weave.config.json"
   echo "→ wrote weave.config.json"
+elif [ "$PORT_SET" = 1 ]; then
+  echo "⚠ weave.config.json already exists — leaving it untouched; edit its \"port\" by hand to make --port $PORT stick for 'bun run start'"
 fi
 if [ ! -e "$TARGET/CLAUDE.md" ]; then
   cp "$SCRIPT_DIR/CLAUDE.template.md" "$TARGET/CLAUDE.md"
@@ -94,7 +97,8 @@ echo "→ building dashboard graphs"
 ( cd "$TARGET/.weave" && bun run build:graphs ) \
   || echo "⚠ graph build hit an error — the dashboard will build graphs on demand instead"
 
-# ── 6 + 7. first-run skill passes: repo-map (richer map) + bug-scan (backlog) ─
+# ── 6. first-run skill pass: bug-scan (fills the backlog from your own code) ──
+#    (dataflow + schemas graphs are deterministic — already built in step 5.)
 run_skill() {  # $1 = prompt, $2 = label
   echo "→ running $2 …"
   if ( cd "$TARGET" && claude -p "$1" --permission-mode acceptEdits ); then
@@ -104,7 +108,6 @@ run_skill() {  # $1 = prompt, $2 = label
   fi
 }
 if [ "$DO_SCAN" = 1 ] && [ "$HAVE_CLAUDE" = 1 ]; then
-  run_skill "Use the repo-map skill to introspect this repository and write a rich .weave/cache/repo-map-graph.json." "repo-map"
   run_skill "Use the bug-scan skill to scan this codebase for likely bugs, verify them, and file backlog tickets." "bug-scan"
 fi
 
@@ -120,7 +123,6 @@ if [ "$DO_SCAN" != 1 ] || [ "$HAVE_CLAUDE" != 1 ]; then
   cat <<'EOF'
 
   enrich it from Claude Code (run inside your repo):
-    /repo-map     build a richer codebase map
     /bug-scan     scan for bugs and fill the backlog
 EOF
 fi

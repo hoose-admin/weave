@@ -92,5 +92,8 @@ environment variables.
 ## Boundaries (do not violate)
 
 - Never run git — neither in `server.ts` nor in the graph builders.
-- Never delete a ticket file outright; archive is the terminal state.
+- No *automatic* deletion: the lifecycle's terminal state is `7-archive`, and
+  nothing acting on its own (the server poll, graph builders, skills) ever
+  removes a ticket. Outright deletion happens only on an explicit, confirm-gated
+  user action in the UI (`DELETE /api/tickets/:id` → `deleteTicket`).
 - Localhost-only bind (`127.0.0.1`); no auth layer.

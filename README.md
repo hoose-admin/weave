@@ -28,8 +28,8 @@ Claude Code is installed) a backlog of real findings from your code.
 ### Requirements
 
 - **[Bun](https://bun.sh)** — runs the dashboard and the CLI. *(required)*
-- **[Claude Code](https://claude.com/claude-code)** — powers the `repo-map` and
-  `bug-scan` skills. *(optional, but it's the point)*
+- **[Claude Code](https://claude.com/claude-code)** — powers the `bug-scan` skill
+  that fills the backlog from your code. *(optional, but it's the point)*
 - **python3** — for the optional end-of-turn skill-reflection hook. *(optional)*
 
 ---
@@ -43,17 +43,17 @@ Claude Code is installed) a backlog of real findings from your code.
    and an `ADRs/` folder.
 4. **Writes `weave.config.json`** and a starter `CLAUDE.md` (only if you don't
    already have one).
-5. **Builds the dashboard graphs** — deterministic, no Claude needed.
-6. **Runs `repo-map`** (if Claude Code is present) — a richer codebase map.
-7. **Runs `bug-scan`** (if Claude Code is present) — files verified bugs into the
+5. **Builds the dashboard graphs** — deterministic, no Claude needed. The
+   `dataflow` and `schemas` graphs are detected straight from your code here.
+6. **Runs `bug-scan`** (if Claude Code is present) — files verified bugs into the
    backlog. The board is populated by *your* code from minute one.
 
-Flags: `--no-scan` (skip steps 6–7), `--start` (launch the board at the end),
+Flags: `--no-scan` (skip step 6), `--start` (launch the board at the end),
 `--port N`.
 
-> The headless skill passes (`claude -p …`) are best-effort. If they don't fully
-> complete under your permission settings, just run them interactively in Claude
-> Code: `/repo-map` and `/bug-scan`. Everything else in setup is deterministic.
+> The headless bug-scan pass (`claude -p …`) is best-effort. If it doesn't fully
+> complete under your permission settings, just run it interactively in Claude
+> Code: `/bug-scan`. Everything else in setup is deterministic.
 
 ---
 
@@ -74,10 +74,10 @@ Drag tickets between buckets in the UI, edit them in the browser, or let the
 
 | View | What it shows |
 |---|---|
-| **repo-map** | Your codebase — directories, files, and relative-import edges. A filesystem-walk heuristic by default; the `repo-map` skill writes a richer map. |
 | **tickets** | `depends_on` / `blocks` / `related` across the board. |
-| **skills** | Your Claude Code skill portfolio (`connects_to` orchestration graph). |
+| **dataflow** | Architecture diagram — frontend routes → backend container(s)/endpoints → databases, detected per repo. |
 | **ai** | The full Claude Code ecosystem — skills, agents, hooks, MCP, settings. |
+| **schemas** | Your databases — detects Firestore / SQL / BigQuery usage and maps each one's tables/collections, columns/fields, and relationships. |
 | **adrs** | Architecture Decision Records and the tickets that implement them. |
 
 ## The skills
@@ -85,7 +85,6 @@ Drag tickets between buckets in the UI, edit them in the browser, or let the
 | Skill | Kind | What it does |
 |---|---|---|
 | `ticket-manager` | utility | Owns the `.tickets/` lifecycle. The hub. |
-| `repo-map` | generator | Introspects the repo → writes `repo-map-graph.json`. |
 | `bug-scan` | workflow | Fan-out bug hunt → adversarial verify → files backlog tickets. |
 | `adr-manager` | workflow | Create / transition / link Architecture Decision Records. |
 | `adr-researcher` | audit | Researches a decision and drafts an ADR. |

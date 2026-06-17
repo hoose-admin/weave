@@ -30,10 +30,10 @@
     <body class="graphs-page">
         <!-- weave:navbar active="graphs" -->
         <div class="subnav" id="subnav">
-            <a href="/graphs/repo-map" data-kind="repo-map">repo-map</a>
             <a href="/graphs/tickets" data-kind="tickets">tickets</a>
-            <a href="/graphs/skills" data-kind="skills">skills</a>
+            <a href="/graphs/dataflow" data-kind="dataflow">dataflow</a>
             <a href="/graphs/ai" data-kind="ai">ai</a>
+            <a href="/graphs/schemas" data-kind="schemas">schemas</a>
         </div>
         <div class="graph-title" id="graph-title">
             <span class="graph-title-name" id="graph-title-name"></span>
@@ -65,44 +65,48 @@
         </div>
         <div class="graph-stats" id="info"></div>
         <div id="cy"></div>
-        <details class="legend" id="legend-repo-map" hidden>
+        <details class="legend" id="legend-dataflow" hidden>
             <summary>key / legend</summary>
             <h4>nodes</h4>
             <ul>
-                <li><span class="sw orchestrator"></span>directory</li>
-                <li><span class="sw generator"></span>file <small>coloured by language (ts · js · py · go · rs …)</small></li>
-                <li>★ entry point <small>index / main / mod</small></li>
+                <li><span class="sw fe"></span>frontend route <em>(⚡ = cached)</em></li>
+                <li><span class="sw container"></span>deploy container <small>backend service</small></li>
+                <li><span class="sw endpoint"></span>endpoint <small>server action</small></li>
+                <li><span class="sw endpoint-api"></span>endpoint <small>API route</small></li>
+                <li><span class="sw store-firestore"></span>Firestore collection</li>
+                <li><span class="sw store-sql"></span>SQL table</li>
+                <li><span class="sw store-bq"></span>BigQuery table</li>
             </ul>
             <h4>edges</h4>
             <ul>
-                <li><span class="ln related"></span>contains <small>directory → child</small></li>
-                <li><span class="ln depends-on"></span>imports <small>file → file (relative import)</small></li>
+                <li><span class="ln fetch-cached"></span>fetch (cached)</li>
+                <li><span class="ln fetch"></span>fetch (uncached)</li>
+                <li><span class="ln hosts"></span>container hosts endpoint</li>
+                <li><span class="ln reads"></span>reads store</li>
+                <li><span class="ln writes"></span>writes store</li>
             </ul>
             <p class="hint">
-                best-effort structure from a filesystem walk · the <code>repo-map</code> skill writes a richer map · click a node to focus its lineage
+                route → endpoint (in a container) → database · click a node to focus its lineage · click background to clear
             </p>
         </details>
-        <details class="legend" id="legend-skills" hidden>
+        <details class="legend" id="legend-schemas" hidden>
             <summary>key / legend</summary>
-            <h4>nodes</h4>
+            <h4>tables <small>(coloured by database · click to expand columns)</small></h4>
             <ul>
-                <li><span class="sw orchestrator"></span>orchestrator <small>routes intent</small></li>
-                <li><span class="sw audit"></span>audit <small>read-only inspection</small></li>
-                <li><span class="sw action"></span>action <small>mutates state</small></li>
-                <li><span class="sw generator"></span>generator <small>produces artifact</small></li>
-                <li><span class="sw utility"></span>utility</li>
-                <li><span class="sw specialized"></span>specialized</li>
-                <li><span class="sw workflow"></span>workflow <small>procedural multi-step skill</small></li>
-                <li><span class="sw leaf"></span>leaf</li>
-                <li><span class="sw orphan"></span>orphan <small>no connects_to in/out</small></li>
+                <li><span class="sw db-firestore"></span>Firestore collection</li>
+                <li><span class="sw db-sql"></span>SQL table</li>
+                <li><span class="sw db-bigquery"></span>BigQuery table</li>
+                <li><span class="sw db-matview"></span>materialized view <small>⊳ (columns need ?live=1)</small></li>
             </ul>
-            <h4>edges</h4>
+            <h4>columns &amp; edges</h4>
             <ul>
-                <li><span class="ln edge-parent"></span><strong>parent</strong> <small>canonical entry → child (the tree)</small></li>
-                <li><span class="ln edge-handoff"></span><strong>handoff</strong> <small>invokes/recommends, but doesn't own (cross-cluster, shared primitives)</small></li>
+                <li><span class="sw schema-column"></span>column <small>◆ = key (id / PK / partition)</small></li>
+                <li><span class="ln schema-subcollection"></span><strong>subcollection</strong> <small>Firestore nesting (parent → child)</small></li>
+                <li><span class="ln schema-references"></span><strong>references</strong> <small>FK-by-convention (deterministic *Id)</small></li>
+                <li><span class="ln schema-joins"></span><strong>joins</strong> <small>SQL/BQ JOIN…ON / USING</small></li>
             </ul>
             <p class="hint">
-                use the <em>edges</em> dropdown above to filter to parent-only (tree view) · click a node to focus its lineage · click background to clear · convention: <code>.claude/skills/skill-builder/references/CONNECTS_TO_CONVENTION.md</code>
+                click a table to expand/collapse its columns · click any node to open the field inspector · for SQL/BigQuery append <code>?live=1</code> to the URL for live INFORMATION_SCHEMA introspection
             </p>
         </details>
         <details class="legend" id="legend-tickets" hidden>

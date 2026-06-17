@@ -2,9 +2,10 @@ import { join } from "node:path";
 import { readFile, stat, readdir } from "node:fs/promises";
 import { PORT, REPO_ROOT } from "./weave.config.ts";
 import { BUCKETS, listAll, listBucket, readTicket, writeTicket, moveTicket, createTicket, deleteTicket, findTicket, archiveStaleComplete, type Bucket } from "./lib/tickets.ts";
+import type { Frontmatter } from "./lib/frontmatter.ts";
 import { buildTicketGraph } from "./lib/graphs/tickets.ts";
-import { buildRepoMapGraph } from "./lib/graphs/repo-map.ts";
-import { buildSkillGraph, skillSourceMtimes } from "./lib/graphs/skills.ts";
+import { buildDataflowGraph } from "./lib/graphs/dataflow.ts";
+import { buildSchemasGraph } from "./lib/graphs/schemas.ts";
 import { buildAiGraph, aiSourceMtimes } from "./lib/graphs/ai.ts";
 import {
   ADR_STATES,
@@ -29,7 +30,7 @@ import {
   type ParsedAdr,
 } from "./lib/adrs.ts";
 
-type GraphKind = "tickets" | "repo-map" | "skills" | "adrs" | "ai";
+type GraphKind = "tickets" | "dataflow" | "schemas" | "adrs" | "ai";
 
 const ROOT = import.meta.dir;
 const PUBLIC = join(ROOT, "public");
@@ -45,14 +46,37 @@ const MIME: Record<string, string> = {
   ".png":  "image/png",
 };
 
+// Security headers — defense-in-depth on top of the per-sink HTML escaping.
+// The app is localhost-only and single-user but renders user-authored
+// ticket/ADR content. 'unsafe-inline' stays in script-src because every page
+// inlines a tiny theme-bootstrap <script> in its <head> to avoid a FOUC; the
+// primary XSS defense is escaping + the markdown link-scheme allowlist, not
+// this CSP. The CSP still blocks external script/connect origins, plugins,
+// framing, and <base> injection.
+const CSP = [
+  "default-src 'self'",
+  "script-src 'self' 'unsafe-inline'",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data:",
+  "object-src 'none'",
+  "base-uri 'self'",
+  "frame-ancestors 'none'",
+].join("; ");
+const NOSNIFF = { "x-content-type-options": "nosniff" };
+const HTML_HEADERS = {
+  "content-security-policy": CSP,
+  "referrer-policy": "no-referrer",
+  ...NOSNIFF,
+};
+
 const json = (data: unknown, status = 200) =>
-  new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json" } });
+  new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json", ...NOSNIFF } });
 
 const err = (msg: string, status = 400) => json({ error: msg }, status);
 
 const NAV_ITEMS: ReadonlyArray<{ key: string; href: string; label: string }> = [
   { key: "board",   href: "/",                 label: "board"  },
-  { key: "graphs",  href: "/graphs/repo-map",  label: "graphs" },
+  { key: "graphs",  href: "/graphs/dataflow",  label: "graphs" },
   { key: "adrs",    href: "/adrs",             label: "adrs"   },
 ];
 
@@ -134,9 +158,9 @@ async function serveStatic(path: string): Promise<Response> {
         renderNavbar(active ?? "", status === "status"));
       const modal = await renderHowtoModal();
       html = html.replace(HOWTO_MARKER_RE, () => modal);
-      return new Response(html, { headers: { "content-type": MIME[ext], "cache-control": "no-store" } });
+      return new Response(html, { headers: { "content-type": MIME[ext], "cache-control": "no-store", ...HTML_HEADERS } });
     }
-    return new Response(buf, { headers: { "content-type": MIME[ext] ?? "application/octet-stream", "cache-control": "no-store" } });
+    return new Response(buf, { headers: { "content-type": MIME[ext] ?? "application/octet-stream", "cache-control": "no-store", ...NOSNIFF } });
   } catch {
     return new Response("not found", { status: 404 });
   }
@@ -179,8 +203,12 @@ async function newestSourceMtime(kind: GraphKind): Promise<number> {
   if (kind === "tickets") {
     return newestMtime(".tickets", (p) => /TKT-\d+.*\.md$/.test(p));
   }
-  if (kind === "skills") {
-    return skillSourceMtimes();
+  if (kind === "dataflow" || kind === "schemas") {
+    // Both builders introspect the project source tree (routes, server
+    // actions, DB collection/table usage). Invalidate the cache whenever any
+    // source file changes; rarer deploy/config edits (Dockerfile, schema.prisma)
+    // are picked up via the `rebuild` button.
+    return newestMtime(".", (p) => /\.(ts|tsx|js|jsx)$/.test(p));
   }
   if (kind === "ai") {
     return aiSourceMtimes();
@@ -194,14 +222,16 @@ async function newestSourceMtime(kind: GraphKind): Promise<number> {
     ]);
     return Math.max(adrMtime, ticketMtime);
   }
-  // repo-map: the cache is written by the repo-map skill (a rich introspection)
-  // or by the heuristic fallback builder. Treat a written cache as always fresh
-  // so the skill's richer output is never silently clobbered; `?rebuild=1`
-  // forces the heuristic rebuild on demand.
   return 0;
 }
 
-async function readCachedOrBuild(kind: GraphKind, rebuild: boolean): Promise<unknown> {
+async function readCachedOrBuild(kind: GraphKind, rebuild: boolean, live = false): Promise<unknown> {
+  // Live mode (schemas ?live=1) always builds fresh against the real database
+  // and is never served from — or written to — the static cache, so the fast
+  // offline default stays intact.
+  if (kind === "schemas" && live) {
+    return await buildSchemasGraph({ live: true });
+  }
   const file = join(CACHE, `${kind}-graph.json`);
   if (!rebuild) {
     try {
@@ -217,8 +247,8 @@ async function readCachedOrBuild(kind: GraphKind, rebuild: boolean): Promise<unk
   }
   const graph =
     kind === "tickets" ? await buildTicketGraph()
-    : kind === "repo-map" ? await buildRepoMapGraph()
-    : kind === "skills" ? await buildSkillGraph()
+    : kind === "dataflow" ? await buildDataflowGraph()
+    : kind === "schemas" ? await buildSchemasGraph()
     : kind === "ai" ? await buildAiGraph()
     : await (await import("./lib/graphs/adrs.ts")).buildAdrGraph();
   const { writeFile, mkdir } = await import("node:fs/promises");
@@ -236,8 +266,8 @@ const server = Bun.serve({
 
     // Routes
     if (pathname === "/")                return serveStatic("index.html");
-    if (pathname === "/graphs")          return Response.redirect("/graphs/repo-map", 302);
-    if (/^\/graphs\/(tickets|repo-map|skills|ai)\/?$/.test(pathname)) return serveStatic("graphs.html");
+    if (pathname === "/graphs")          return Response.redirect("/graphs/dataflow", 302);
+    if (/^\/graphs\/(tickets|dataflow|schemas|ai)\/?$/.test(pathname)) return serveStatic("graphs.html");
     if (pathname.startsWith("/ticket/")) return serveStatic("ticket.html");
     if (pathname === "/adrs" || pathname === "/adrs/") return serveStatic("adrs.html");
     if (pathname === "/palette" || pathname === "/palette/") return serveStatic("palette.html");
@@ -266,7 +296,7 @@ const server = Bun.serve({
     if (pathname === "/api/tickets" && req.method === "POST") {
       let payload: Record<string, unknown>;
       try {
-        payload = await req.json();
+        payload = (await req.json()) as Record<string, unknown>;
       } catch {
         return err("invalid JSON body");
       }
@@ -320,7 +350,7 @@ const server = Bun.serve({
           return t ? json(t) : err("not found", 404);
         }
         if (req.method === "PUT") {
-          const { frontmatter, body } = await req.json();
+          const { frontmatter, body } = (await req.json()) as { frontmatter?: Frontmatter; body?: string };
           if (!frontmatter || typeof body !== "string") return err("expected {frontmatter, body}");
           await writeTicket(id, frontmatter, body);
           return json({ ok: true });
@@ -338,17 +368,18 @@ const server = Bun.serve({
     const moveMatch = pathname.match(/^\/api\/tickets\/(TKT-\d+)\/move$/);
     if (moveMatch && req.method === "POST") {
       const id = moveMatch[1];
-      const { to } = await req.json();
-      if (!BUCKETS.includes(to)) return err(`invalid bucket: ${to}`);
+      const { to } = (await req.json()) as { to?: unknown };
+      if (typeof to !== "string" || !BUCKETS.includes(to as Bucket)) return err(`invalid bucket: ${String(to)}`);
       const result = await moveTicket(id, to as Bucket);
       return json(result);
     }
 
-    const graphMatch = pathname.match(/^\/api\/graphs\/(tickets|repo-map|skills|adrs|ai)$/);
+    const graphMatch = pathname.match(/^\/api\/graphs\/(tickets|dataflow|schemas|adrs|ai)$/);
     if (graphMatch && req.method === "GET") {
       const kind = graphMatch[1] as GraphKind;
       const rebuild = url.searchParams.get("rebuild") === "1";
-      return json(await readCachedOrBuild(kind, rebuild));
+      const live = url.searchParams.get("live") === "1";
+      return json(await readCachedOrBuild(kind, rebuild, live));
     }
 
     // -----------------------------------------------------------------------
@@ -364,7 +395,7 @@ const server = Bun.serve({
     if (pathname === "/api/adrs" && req.method === "POST") {
       let payload: Record<string, unknown>;
       try {
-        payload = await req.json();
+        payload = (await req.json()) as Record<string, unknown>;
       } catch {
         return err("invalid JSON body");
       }
@@ -525,7 +556,7 @@ const server = Bun.serve({
           return json({ comments: await readComments(id) });
         }
         if (req.method === "POST") {
-          const payload = await req.json();
+          const payload = (await req.json()) as Record<string, unknown>;
           const author = typeof payload.author === "string" ? payload.author.trim() : "";
           const text = typeof payload.text === "string" ? payload.text.trim() : "";
           if (!author) return err("author required");
@@ -547,7 +578,7 @@ const server = Bun.serve({
           return json({ references: await listReferences(id) });
         }
         if (req.method === "POST") {
-          const payload = await req.json();
+          const payload = (await req.json()) as Record<string, unknown>;
           const filename = typeof payload.filename === "string" ? payload.filename.trim() : "";
           const content = typeof payload.content === "string" ? payload.content : "";
           if (!filename) return err("filename required");

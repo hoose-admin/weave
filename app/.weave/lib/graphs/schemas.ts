@@ -1,0 +1,1631 @@
+// Generic, detection-based multi-database schema graph for the dashboard's
+// /graphs/schemas view.
+//
+// Generalizes the loopweave-specific BigQuery schema builder (bq-schema.ts)
+// into a MULTI-DATABASE diagram. It auto-detects which databases a repo uses —
+// Firestore/Firebase, SQL (Prisma / Drizzle / raw .sql), and BigQuery — and
+// renders each database's tables/collections + columns/fields + relationships,
+// merged into one Cytoscape graph and tagged per `db`.
+//
+//   table  (compound parent) ──contains──▶ column (child, data.parent = table)
+//   column ──fk-reference──▶ column            (FK-by-convention: *Id → that table)
+//   column ──joins──▶ column                   (SQL/BQ JOIN ... ON / USING)
+//   table  ──subcollection──▶ table            (Firestore parent → subcollection)
+//
+// This is the ONE graph that uses Cytoscape compound parent nodes (every column
+// declares data.parent = its table id); the viewer collapses tables by default.
+//
+// Each DB lives behind a SchemaProvider seam (ported from bq-schema.ts) so the
+// set of databases is open: a provider detect()s its own usage and introspect()s
+// either statically (parse source, no credentials) or live (behind opts.live).
+// If NO database is detected the graph is empty plus a "no-database" warning —
+// it never crashes on an arbitrary repo.
+
+import { readdir, readFile } from "node:fs/promises";
+import { join, relative, extname } from "node:path";
+import { REPO_ROOT } from "../../weave.config.ts";
+
+// ── Public types (Cytoscape shape) ────────────────────────────────────────────
+
+export type Db = "firestore" | "sql" | "bigquery";
+type NodeKind = "table" | "column";
+// "fk-reference" (not "references") deliberately avoids colliding with the AI
+// graph's edge[kind="references"] style — all graph styles share one array.
+type EdgeKind = "fk-reference" | "joins" | "subcollection";
+
+export interface SchemaNode {
+  data: {
+    id: string; // table → "<db>:<name>"; column → "<db>:<table>.<col>"
+    label: string;
+    kind: NodeKind;
+    db: Db;
+    // table-only
+    matview?: boolean;
+    partitionField?: string;
+    clusterFields?: string[];
+    subOf?: string; // firestore subcollections only — parent table id
+    // column-only
+    parent?: string; // column → its table id (Cytoscape compound)
+    fieldType?: string;
+    mode?: string; // REQUIRED / NULLABLE / REPEATED
+    description?: string;
+    isKey?: boolean;
+  };
+}
+
+export interface SchemaEdge {
+  data: {
+    id: string;
+    source: string;
+    target: string;
+    kind: EdgeKind;
+    label?: string; // the referencing field / join key
+    confidence?: "high" | "low";
+    sourceFile?: string;
+  };
+}
+
+export interface SchemasGraph {
+  nodes: SchemaNode[];
+  edges: SchemaEdge[];
+  meta: {
+    built: string;
+    source: "static" | "live";
+    counts: Record<string, number>;
+    warnings: Warning[];
+    databases: { db: Db; tables: number }[];
+  };
+}
+
+export type Warning = { kind: string; detail: string };
+
+// ── Provider seam ─────────────────────────────────────────────────────────────
+//
+// DB-agnostic intermediate representation. Each provider lowers its own world
+// (Firestore code, Prisma models, BQ SchemaField calls, …) into TableDef[] +
+// RelationDef[]; buildSchemasGraph() renders the union.
+
+export interface FieldDef {
+  name: string;
+  type?: string; // fieldType
+  mode?: string; // REQUIRED / NULLABLE / REPEATED
+  description?: string;
+  isKey?: boolean;
+}
+
+export interface TableDef {
+  db: Db;
+  name: string;
+  fields: FieldDef[];
+  matview?: boolean;
+  partitionField?: string;
+  clusterFields?: string[];
+  subOf?: string; // firestore: bare name of the parent collection
+}
+
+export interface RelationDef {
+  db: Db;
+  kind: EdgeKind;
+  // Endpoints are bare names. For column endpoints set the *Col fields too;
+  // a relation with only table names renders as a table↔table edge.
+  fromTable: string;
+  fromCol?: string;
+  toTable: string;
+  toCol?: string;
+  label?: string;
+  confidence?: "high" | "low";
+  sourceFile?: string;
+}
+
+export interface ProviderResult {
+  tables: TableDef[];
+  relations: RelationDef[];
+  warnings: Warning[];
+}
+
+export interface SchemaProvider {
+  db: Db;
+  detect(): Promise<boolean>;
+  introspect(opts: { live?: boolean }): Promise<ProviderResult>;
+}
+
+// ── Shared filesystem helpers ─────────────────────────────────────────────────
+
+const IGNORE_DIRS = new Set([
+  "node_modules", ".git", ".next", ".nuxt", ".svelte-kit", "dist", "build",
+  "out", "__pycache__", ".venv", "venv", ".turbo", "coverage", ".cache",
+  "vendor", "target", ".idea", ".vscode", ".weave", ".pytest_cache", ".mypy_cache",
+]);
+
+const MAX_FILE_BYTES = 400_000;
+
+async function walk(root: string, keep: (rel: string) => boolean): Promise<string[]> {
+  const out: string[] = [];
+  const stack = [root];
+  while (stack.length) {
+    const dir = stack.pop()!;
+    let ents;
+    try {
+      ents = await readdir(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const e of ents) {
+      const full = join(dir, e.name);
+      if (e.isDirectory()) {
+        if (e.name.startsWith(".") || IGNORE_DIRS.has(e.name)) continue;
+        stack.push(full);
+      } else if (e.isFile()) {
+        const rel = relative(root, full);
+        if (keep(rel)) out.push(rel);
+      }
+    }
+  }
+  return out;
+}
+
+async function readPackageJson(): Promise<Record<string, unknown> | null> {
+  try {
+    return JSON.parse(await readFile(join(REPO_ROOT, "package.json"), "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function depNames(pkg: Record<string, unknown> | null): Set<string> {
+  const names = new Set<string>();
+  if (!pkg) return names;
+  for (const key of ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"]) {
+    const block = pkg[key];
+    if (block && typeof block === "object") {
+      for (const dep of Object.keys(block as Record<string, unknown>)) names.add(dep);
+    }
+  }
+  return names;
+}
+
+const TS_EXTS = new Set([".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"]);
+function isTsLike(rel: string): boolean {
+  return TS_EXTS.has(extname(rel).toLowerCase());
+}
+
+// ── FirestoreProvider ─────────────────────────────────────────────────────────
+//
+// Static introspection from code. We never need credentials: collections come
+// from `.collection('x')` / `.collectionGroup('x')` call sites (the bare string,
+// a `const X_COLLECTION = 'x'` constant, or a `.doc(...).collection('child')`
+// subcollection chain), and fields come from the object literals written to a
+// collection (`.set/.add/.update/.create({...})`) merged with any matching
+// TypeScript interface/type.
+
+const COLL_DIRS = ["src", "app", "lib", "server", "functions", "pages", "components"];
+
+interface FsCollection {
+  name: string;
+  parent?: string; // subcollection parent name
+  fields: Map<string, FieldDef>;
+}
+
+export class FirestoreProvider implements SchemaProvider {
+  db: Db = "firestore";
+
+  async detect(): Promise<boolean> {
+    const deps = depNames(await readPackageJson());
+    if (deps.has("firebase-admin") || deps.has("@google-cloud/firestore") || deps.has("firebase")) {
+      return true;
+    }
+    // Fall back to call-site evidence for repos that vendor the SDK or use a
+    // monorepo root without the dep in this package.json.
+    for (const rel of await this.sourceFiles()) {
+      const src = await safeRead(rel);
+      if (src && /\.(collection|collectionGroup|doc)\s*\(/.test(src)) return true;
+    }
+    return false;
+  }
+
+  private async sourceFiles(): Promise<string[]> {
+    return walk(REPO_ROOT, (rel) => {
+      if (!isTsLike(rel)) return false;
+      const top = rel.split(/[\\/]/)[0];
+      // Restrict to plausible source roots, but always allow a flat repo.
+      return COLL_DIRS.includes(top) || !rel.includes("/");
+    });
+  }
+
+  async introspect(opts: { live?: boolean }): Promise<ProviderResult> {
+    const warnings: Warning[] = [];
+    if (opts.live) {
+      // ── Live seam ────────────────────────────────────────────────────────
+      // A real live path would `import { getFirestore } from "firebase-admin/firestore"`,
+      // call db.listCollections() for top-level collections, sample a document
+      // per collection (and per subcollection via doc.ref.listCollections()) to
+      // recover field names/types from real data. That needs a service-account
+      // credential (GOOGLE_APPLICATION_CREDENTIALS) which we don't assume here,
+      // so we fall back to the static parse and warn.
+      warnings.push({
+        kind: "live-unavailable",
+        detail: "firestore live introspection needs credentials; using static",
+      });
+    }
+
+    const files = await this.sourceFiles();
+    const collections = new Map<string, FsCollection>(); // key: "parent/name" or "name"
+    const subEdges = new Set<string>(); // "parent::child"
+    const interfaces = new Map<string, FieldDef[]>(); // TypeName → fields
+
+    for (const rel of files) {
+      const src = await safeRead(rel);
+      if (!src) continue;
+      collectInterfaces(src, interfaces);
+      scanFirestoreFile(src, collections, subEdges, warnings);
+    }
+
+    // Consolidate to one entry per collection NAME. A collection can get
+    // registered both with a parent (subcollection chain) and parentless (a
+    // ref-var chain whose `.doc()` context was elsewhere); collapse those,
+    // preferring the parented entry and merging all fields, so each collection
+    // is a single table. (Firestore collection names are globally unique by
+    // convention even when they appear as subcollections of multiple parents.)
+    const byName = new Map<string, FsCollection>();
+    for (const c of collections.values()) {
+      const existing = byName.get(c.name);
+      if (!existing) {
+        byName.set(c.name, { name: c.name, parent: c.parent, fields: new Map(c.fields) });
+        continue;
+      }
+      if (!existing.parent && c.parent) existing.parent = c.parent;
+      for (const [k, f] of c.fields) {
+        const ef = existing.fields.get(k);
+        if (!ef) existing.fields.set(k, { ...f });
+        else if (!ef.type && f.type) ef.type = f.type;
+      }
+    }
+    collections.clear();
+    for (const [name, c] of byName) collections.set(name, c);
+
+    // Merge TypeScript interface/type fields into collections whose singularized
+    // name matches the type name (campaigns ↔ Campaign, notes ↔ Note, …). When
+    // no exact name matches, fall back to a UNIQUE interface whose name ends in
+    // the singular candidate (markers ↔ MapMarker) — only if unambiguous.
+    const ifaceNames = [...interfaces.keys()];
+    for (const coll of collections.values()) {
+      const cands = typeNameCandidates(coll.name);
+      const matched: FieldDef[][] = [];
+      for (const cand of cands) {
+        const exact = interfaces.get(cand);
+        if (exact) matched.push(exact);
+      }
+      if (matched.length === 0) {
+        for (const cand of cands) {
+          const ending = ifaceNames.filter((n) => n.endsWith(cand) && n !== cand);
+          if (ending.length === 1) {
+            matched.push(interfaces.get(ending[0])!);
+            break;
+          }
+        }
+      }
+      for (const ifFields of matched) {
+        for (const f of ifFields) {
+          const existing = coll.fields.get(f.name);
+          if (!existing) {
+            coll.fields.set(f.name, { ...f });
+          } else {
+            if (!existing.type && f.type) existing.type = f.type;
+            if (existing.isKey === undefined && f.isKey) existing.isKey = true;
+          }
+        }
+      }
+    }
+
+    // Key heuristics: doc-id convention fields.
+    for (const coll of collections.values()) {
+      for (const f of coll.fields.values()) {
+        if (isKeyField(f.name)) f.isKey = true;
+      }
+    }
+
+    const collByName = new Map<string, FsCollection>();
+    for (const c of collections.values()) collByName.set(c.name, c);
+
+    const tables: TableDef[] = [];
+    for (const c of collections.values()) {
+      tables.push({
+        db: "firestore",
+        name: c.name,
+        subOf: c.parent,
+        fields: [...c.fields.values()],
+      });
+    }
+
+    const relations: RelationDef[] = [];
+
+    // Subcollection edges.
+    for (const key of subEdges) {
+      const [parent, child] = key.split("::");
+      relations.push({
+        db: "firestore",
+        kind: "subcollection",
+        fromTable: parent,
+        toTable: child,
+      });
+    }
+
+    // FK-by-convention. A field named <x>Id / <x>Ids points at collection <x>
+    // (also the common gmId/authorId/createdBy/playerIds aliases). If no such
+    // collection exists the referent is an external store (e.g. Firebase Auth
+    // localIds) — warn instead of drawing a dangling edge or inventing a table.
+    const externalRefs = new Set<string>();
+    for (const c of collections.values()) {
+      for (const f of c.fields.values()) {
+        const referent = referencedCollection(f.name);
+        if (!referent) continue;
+        const target = resolveReferent(referent, collByName);
+        if (target) {
+          if (target === c.name) continue; // self-id (the doc's own key)
+          relations.push({
+            db: "firestore",
+            kind: "fk-reference",
+            fromTable: c.name,
+            fromCol: f.name,
+            toTable: target,
+            toCol: idColumnOf(collByName.get(target)!),
+            label: f.name,
+            confidence: "high",
+          });
+        } else {
+          externalRefs.add(`${c.name}.${f.name}`);
+        }
+      }
+    }
+    if (externalRefs.size) {
+      warnings.push({
+        kind: "external-reference",
+        detail:
+          `${externalRefs.size} field(s) reference an external identity store ` +
+          `(no matching Firestore collection — likely Firebase Auth localIds): ` +
+          [...externalRefs].sort().join(", "),
+      });
+    }
+
+    return { tables, relations, warnings };
+  }
+}
+
+type CollRef = { name: string; parent?: string };
+
+// Scan one source file: register every Firestore collection / subcollection it
+// touches and attribute the field writes (`.set/.add/.update/.create({...})`)
+// to the right collection.
+//
+// The hard part is resolving the *collection* a write lands on, since the chain
+// can be split across `const fooRef = firestore.collection(...).doc(...)` ref
+// variables and `batch.set(fooRef, {...})` two-arg writes. We do this in two
+// phases: (A) resolve every ref variable to its {collection, parent} with a
+// fixpoint (so `tacticalItemsRef = characterRef.collection('x')` resolves once
+// `characterRef` is known), then (B) attribute writes using those bindings.
+function scanFirestoreFile(
+  src: string,
+  collections: Map<string, FsCollection>,
+  subEdges: Set<string>,
+  warnings: Warning[],
+): void {
+  void warnings;
+  const constMap = collectCollectionConstants(src);
+
+  const getColl = (parent: string | undefined, name: string): FsCollection => {
+    const key = parent ? `${parent}/${name}` : name;
+    let c = collections.get(key);
+    if (!c) {
+      c = { name, parent, fields: new Map() };
+      collections.set(key, c);
+    } else if (parent && !c.parent) {
+      c.parent = parent;
+    }
+    return c;
+  };
+
+  // Resolve a `.collection(ARG)` argument token to a collection name.
+  const resolveArg = (raw: string): string | null => {
+    const t = raw.trim();
+    const lit = t.match(/^['"`]([^'"`]+)['"`]$/);
+    if (lit) return lit[1];
+    if (constMap.has(t)) return constMap.get(t)!;
+    return null;
+  };
+
+  const isFirestoreRoot = (id: string): boolean =>
+    /^(firestore|adminDb|db)$/.test(id) || /[Ff]irestore$/.test(id);
+
+  // Walk a `.collection(...)/.doc(...)/.collectionGroup(...)` segment chain that
+  // begins at `seed` (the collection context inherited from a root ref var, or
+  // undefined for a firestore root). Registers each collection + subcollection
+  // edge and returns the trailing collection. `register` gates side effects so
+  // a speculative walk over an unresolved ref var doesn't pollute the model.
+  const walkChain = (text: string, seed: CollRef | undefined, register: boolean): CollRef | null => {
+    const seg = /\.(collection|collectionGroup|doc)\s*\(/g;
+    let current: string | undefined = seed?.name;
+    let sawDocSinceColl = false;
+    let last: CollRef | null = seed ? { ...seed } : null;
+    let m: RegExpExecArray | null;
+    while ((m = seg.exec(text))) {
+      const kind = m[1];
+      const openIdx = seg.lastIndex - 1;
+      const closeIdx = matchParen(text, openIdx);
+      if (closeIdx < 0) break;
+      if (kind === "doc") {
+        if (current) sawDocSinceColl = true;
+        continue;
+      }
+      const name = resolveArg(text.slice(openIdx + 1, closeIdx));
+      if (!name) continue; // dynamic collection name — unresolved
+      const isSub = kind === "collection" && sawDocSinceColl && !!current;
+      const parent = isSub ? current : undefined;
+      if (register) {
+        getColl(parent, name);
+        if (isSub && parent) subEdges.add(`${parent}::${name}`);
+      }
+      current = name;
+      sawDocSinceColl = false;
+      last = { name, parent };
+    }
+    return last;
+  };
+
+  // ── Phase A: resolve ref-variable bindings to a collection. ────────────────
+  // Collect `const/let/var X = <expr>;` whose expr is a firestore/ref chain.
+  type Binding = { varName: string; expr: string; root: string };
+  const bindings: Binding[] = [];
+  const bindRe = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*([\s\S]*?);/g;
+  let bm: RegExpExecArray | null;
+  while ((bm = bindRe.exec(src))) {
+    const varName = bm[1];
+    const expr = bm[2];
+    if (!/\.(collection|collectionGroup|doc)\s*\(/.test(expr)) continue;
+    const rootMatch = expr.match(/^\s*([A-Za-z_$][\w$]*)/);
+    if (!rootMatch) continue;
+    bindings.push({ varName, expr, root: rootMatch[1] });
+  }
+
+  const refColl = new Map<string, CollRef>();
+  // Fixpoint: a binding resolves once its root is firestore or an already-known
+  // ref var. Iterate until no new binding resolves (handles ref-on-ref chains).
+  for (let pass = 0; pass < bindings.length + 1; pass++) {
+    let progressed = false;
+    for (const b of bindings) {
+      if (refColl.has(b.varName)) continue;
+      let seed: CollRef | undefined;
+      if (isFirestoreRoot(b.root)) {
+        seed = undefined;
+      } else if (refColl.has(b.root)) {
+        seed = refColl.get(b.root)!;
+      } else {
+        continue; // root not yet resolvable
+      }
+      const tail = walkChain(b.expr, seed, true);
+      if (tail) {
+        refColl.set(b.varName, tail);
+        progressed = true;
+      }
+    }
+    if (!progressed) break;
+  }
+
+  // ── Phase B: register any remaining firestore-rooted chains (ones not bound
+  // to a ref var) and attribute every write. ─────────────────────────────────
+  registerInlineChains(src, walkChain, isFirestoreRoot);
+  attributeWrites(src, refColl, walkChain, isFirestoreRoot, getColl);
+}
+
+// Walk every `firestore.collection(...)...` chain that is NOT a `const x = ...`
+// binding (those were handled in phase A) so subcollection edges and collections
+// from inline expressions (`await firestore.collection(C).doc(id).collection('notes').add(...)`)
+// are registered too.
+function registerInlineChains(
+  src: string,
+  walkChain: (text: string, seed: CollRef | undefined, register: boolean) => CollRef | null,
+  isFirestoreRoot: (id: string) => boolean,
+): void {
+  const rootRe = /\b([A-Za-z_$][\w$]*)\s*\.\s*(collection|collectionGroup)\s*\(/g;
+  let rm: RegExpExecArray | null;
+  while ((rm = rootRe.exec(src))) {
+    if (!isFirestoreRoot(rm[1])) continue;
+    const start = rm.index + rm[1].length;
+    const end = consumeChain(src, start);
+    walkChain(src.slice(start, end), undefined, true);
+  }
+}
+
+// Attribute field writes to their collection. Three write shapes are handled:
+//   1. chained:   firestore.collection(C).doc(id).collection('notes').add({...})
+//   2. ref-method: markerRef.set({...})            (markerRef ∈ refColl)
+//   3. two-arg:   batch.set(itemRef, {...})        (itemRef ∈ refColl)
+function attributeWrites(
+  src: string,
+  refColl: Map<string, CollRef>,
+  walkChain: (text: string, seed: CollRef | undefined, register: boolean) => CollRef | null,
+  isFirestoreRoot: (id: string) => boolean,
+  getColl: (parent: string | undefined, name: string) => FsCollection,
+): void {
+  const apply = (coll: CollRef | null, body: string | null) => {
+    if (!coll || !body) return;
+    const target = getColl(coll.parent, coll.name);
+    for (const [k, v] of parseObjectKeys(body)) addField(target, k, v);
+  };
+
+  // Shape 1: chained writes rooted at firestore.
+  const chainWriteRe = /\b([A-Za-z_$][\w$]*)\s*\.\s*(?:collection|collectionGroup)\s*\(/g;
+  let cm: RegExpExecArray | null;
+  const consumedChains: Array<[number, number]> = [];
+  while ((cm = chainWriteRe.exec(src))) {
+    if (!isFirestoreRoot(cm[1])) continue;
+    const start = cm.index + cm[1].length;
+    const end = consumeChain(src, start);
+    consumedChains.push([start, end]);
+    const chainText = src.slice(start, end);
+    if (!/\.(set|add|update|create)\s*\(/.test(chainText)) continue;
+    const tail = walkChain(chainText, undefined, false);
+    // Attribute each write call in the chain to the trailing collection.
+    const writeRe = /\.(set|add|update|create)\s*\(/g;
+    let wm: RegExpExecArray | null;
+    while ((wm = writeRe.exec(chainText))) {
+      const openIdx = writeRe.lastIndex - 1;
+      const closeIdx = matchParen(chainText, openIdx);
+      if (closeIdx < 0) continue;
+      apply(tail, firstObjectLiteral(chainText.slice(openIdx + 1, closeIdx)));
+    }
+  }
+
+  // Shapes 2 & 3: writes whose target collection comes from a ref variable.
+  for (const [varName, coll] of refColl) {
+    // Shape 2: `<refvar>.set/add/update/create({...})`.
+    const m2 = new RegExp(`\\b${escapeRe(varName)}\\s*\\.\\s*(set|add|update|create)\\s*\\(`, "g");
+    let wm: RegExpExecArray | null;
+    while ((wm = m2.exec(src))) {
+      const openIdx = m2.lastIndex - 1;
+      const closeIdx = matchParen(src, openIdx);
+      if (closeIdx < 0) continue;
+      apply(coll, firstObjectLiteral(src.slice(openIdx + 1, closeIdx)));
+    }
+    // Shape 3: `<x>.set/update/create(<refvar>, {...})` (e.g. batch.set(ref,{})).
+    const m3 = new RegExp(`\\.\\s*(set|update|create)\\s*\\(\\s*${escapeRe(varName)}\\s*,`, "g");
+    while ((wm = m3.exec(src))) {
+      // Re-find the '(' of this call to balance-match its full arg list.
+      const callOpen = src.indexOf("(", wm.index);
+      if (callOpen < 0) continue;
+      const callClose = matchParen(src, callOpen);
+      if (callClose < 0) continue;
+      const args = src.slice(callOpen + 1, callClose);
+      // First arg is the ref var; the object literal is the next top-level arg.
+      const comma = skipToComma(args, 0);
+      apply(coll, firstObjectLiteral(args.slice(comma + 1)));
+    }
+  }
+}
+
+// Consume a member-access chain starting at `.`: a run of
+// `.ident` / `.ident(...)` segments (balanced parens), tolerant of newlines.
+function consumeChain(src: string, i: number): number {
+  const n = src.length;
+  while (i < n) {
+    while (i < n && /\s/.test(src[i])) i++;
+    if (src[i] !== ".") break;
+    i++; // consume '.'
+    while (i < n && /\s/.test(src[i])) i++;
+    const idStart = i;
+    while (i < n && /[\w$]/.test(src[i])) i++;
+    if (i === idStart) break; // not an identifier after '.'
+    while (i < n && /\s/.test(src[i])) i++;
+    if (src[i] === "(") {
+      const close = matchParen(src, i);
+      if (close < 0) break;
+      i = close + 1;
+    }
+  }
+  return i;
+}
+
+function addField(coll: FsCollection, name: string, valueExpr: string | undefined): void {
+  if (name === "id") {
+    // The Firestore doc id is the document key, not a stored field, but the
+    // ground-truth interfaces declare it — keep it and mark it a key.
+  }
+  const existing = coll.fields.get(name);
+  const type = valueExpr ? inferType(valueExpr) : undefined;
+  if (!existing) {
+    coll.fields.set(name, { name, type, isKey: isKeyField(name) || undefined });
+  } else if (!existing.type && type && type !== "unknown") {
+    existing.type = type;
+  }
+}
+
+// Pull the first top-level object literal `{...}` out of a call's argument list,
+// skipping a leading spread of nested structures. Returns the inner text.
+function firstObjectLiteral(argBlock: string): string | null {
+  const i = argBlock.indexOf("{");
+  if (i < 0) return null;
+  const close = matchBrace(argBlock, i);
+  if (close < 0) return null;
+  return argBlock.slice(i + 1, close);
+}
+
+// Parse the *top-level* keys of an object-literal body (text between the outer
+// braces). Returns [key, valueExpr] pairs; skips spreads and computed keys.
+function parseObjectKeys(body: string): Array<[string, string | undefined]> {
+  const out: Array<[string, string | undefined]> = [];
+  let i = 0;
+  const n = body.length;
+  while (i < n) {
+    // skip whitespace, commas
+    while (i < n && /[\s,]/.test(body[i])) i++;
+    if (i >= n) break;
+    // skip spread `...x`
+    if (body.startsWith("...", i)) {
+      i = skipValue(body, i);
+      continue;
+    }
+    // comment skip
+    if (body.startsWith("//", i)) {
+      const nl = body.indexOf("\n", i);
+      i = nl < 0 ? n : nl + 1;
+      continue;
+    }
+    if (body.startsWith("/*", i)) {
+      const end = body.indexOf("*/", i);
+      i = end < 0 ? n : end + 2;
+      continue;
+    }
+    // key: identifier | 'str' | "str" | [computed]
+    let key: string | null = null;
+    if (body[i] === "'" || body[i] === '"' || body[i] === "`") {
+      const q = body[i];
+      let j = i + 1;
+      while (j < n && body[j] !== q) {
+        if (body[j] === "\\") j++;
+        j++;
+      }
+      key = body.slice(i + 1, j);
+      i = j + 1;
+    } else if (body[i] === "[") {
+      // computed key — skip the whole entry
+      const close = matchBracket(body, i);
+      i = close < 0 ? n : close + 1;
+      // skip to next comma at depth 0
+      i = skipToComma(body, i);
+      continue;
+    } else if (/[A-Za-z_$]/.test(body[i])) {
+      const s = i;
+      while (i < n && /[\w$]/.test(body[i])) i++;
+      key = body.slice(s, i);
+    } else {
+      i++;
+      continue;
+    }
+    // expect ':' (object literal) — if next non-space is ',' or '}' it's
+    // shorthand { foo } → value is the identifier itself.
+    let k = i;
+    while (k < n && /\s/.test(body[k])) k++;
+    if (body[k] === ":") {
+      i = k + 1;
+      while (i < n && /\s/.test(body[i])) i++;
+      const valStart = i;
+      i = skipToComma(body, i);
+      const valExpr = body.slice(valStart, i).trim();
+      if (key) out.push([key, valExpr]);
+    } else if (body[k] === "(") {
+      // method shorthand `foo() {}` — skip it
+      i = skipToComma(body, k);
+    } else {
+      // shorthand property
+      if (key) out.push([key, key]);
+      i = k;
+      i = skipToComma(body, i);
+    }
+  }
+  return out;
+}
+
+// Infer a Firestore fieldType from a value expression.
+function inferType(expr: string): string {
+  const e = expr.trim();
+  if (e === "") return "unknown";
+  if (/FieldValue\s*\.\s*delete\s*\(/.test(e)) return "delete"; // sentinel — caller skips
+  if (/^['"`]/.test(e)) return "string";
+  if (/^-?\d+(\.\d+)?$/.test(e)) return "number";
+  if (/^(true|false)$/.test(e)) return "boolean";
+  if (/^new\s+Date\b/.test(e)) return "timestamp";
+  if (/FieldValue\s*\.\s*serverTimestamp\s*\(/.test(e)) return "timestamp";
+  if (/\bTimestamp\b/.test(e)) return "timestamp";
+  if (/^\[/.test(e) || /^Array\b/.test(e)) return "array";
+  if (/^\{/.test(e)) return "map";
+  if (/\.ref\b|DocumentReference|\.doc\s*\(/.test(e)) return "reference";
+  if (/^parseInt\b|^parseFloat\b|^Number\b/.test(e)) return "number";
+  if (/^Boolean\b/.test(e)) return "boolean";
+  if (/^String\b/.test(e)) return "string";
+  return "unknown";
+}
+
+// Collect `const X_COLLECTION = 'name'` (and similar) string constants.
+function collectCollectionConstants(src: string): Map<string, string> {
+  const map = new Map<string, string>();
+  const re = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::\s*string)?\s*=\s*['"`]([^'"`]+)['"`]/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(src))) {
+    const name = m[1];
+    if (/COLLECTION|_COLL\b|Collection/.test(name)) map.set(name, m[2]);
+  }
+  return map;
+}
+
+// Parse top-level `interface Name {...}` and `type Name = {...}` field names +
+// inferred TS types.
+function collectInterfaces(src: string, out: Map<string, FieldDef[]>): void {
+  const re = /\b(?:export\s+)?(?:interface|type)\s+([A-Z][\w$]*)\s*(?:extends\s+[\w$.,<>\s]+)?\s*=?\s*\{/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(src))) {
+    const name = m[1];
+    const openIdx = src.indexOf("{", m.index + m[0].length - 1);
+    if (openIdx < 0) continue;
+    const closeIdx = matchBrace(src, openIdx);
+    if (closeIdx < 0) continue;
+    const body = src.slice(openIdx + 1, closeIdx);
+    const fields = parseInterfaceFields(body);
+    if (fields.length) {
+      // Prefer the richer of duplicate declarations.
+      const prev = out.get(name);
+      if (!prev || fields.length > prev.length) out.set(name, fields);
+    }
+  }
+}
+
+function parseInterfaceFields(body: string): FieldDef[] {
+  const out: FieldDef[] = [];
+  // Members are `name?: Type;` at depth 0. Split on top-level `;`/newline.
+  let i = 0;
+  const n = body.length;
+  while (i < n) {
+    while (i < n && /[\s;,]/.test(body[i])) i++;
+    if (i >= n) break;
+    if (body.startsWith("//", i)) {
+      const nl = body.indexOf("\n", i);
+      i = nl < 0 ? n : nl + 1;
+      continue;
+    }
+    if (body.startsWith("/*", i)) {
+      const end = body.indexOf("*/", i);
+      i = end < 0 ? n : end + 2;
+      continue;
+    }
+    // method/index signatures — skip
+    if (body[i] === "[" || body[i] === "(") {
+      i = skipMember(body, i);
+      continue;
+    }
+    const s = i;
+    while (i < n && /[\w$]/.test(body[i])) i++;
+    if (i === s) {
+      i++;
+      continue;
+    }
+    let name = body.slice(s, i);
+    let optional = false;
+    while (i < n && /\s/.test(body[i])) i++;
+    if (body[i] === "?") {
+      optional = true;
+      i++;
+    }
+    while (i < n && /\s/.test(body[i])) i++;
+    if (body[i] !== ":") {
+      // not a property (e.g. a method `foo(): X`) — skip the member
+      i = skipMember(body, i);
+      continue;
+    }
+    i++; // ':'
+    const valStart = i;
+    i = skipMember(body, i);
+    const typeText = body.slice(valStart, i).replace(/[;,]\s*$/, "").trim();
+    if (name && name !== "constructor") {
+      out.push({
+        name,
+        type: tsTypeToFieldType(typeText),
+        mode: optional ? "NULLABLE" : "REQUIRED",
+        isKey: isKeyField(name) || undefined,
+      });
+    }
+  }
+  return out;
+}
+
+// Skip one interface member body up to the top-level `;` or newline boundary,
+// honoring nested braces/brackets/parens/angle brackets and strings.
+function skipMember(s: string, i: number): number {
+  const n = s.length;
+  let depth = 0;
+  while (i < n) {
+    const ch = s[i];
+    if (ch === "{" || ch === "(" || ch === "[" || ch === "<") depth++;
+    else if (ch === "}" || ch === ")" || ch === "]" || ch === ">") {
+      if (depth === 0) return i;
+      depth--;
+    } else if (ch === "'" || ch === '"' || ch === "`") {
+      i = skipString(s, i);
+      continue;
+    } else if (depth === 0 && (ch === ";" || ch === "\n")) {
+      return i;
+    }
+    i++;
+  }
+  return i;
+}
+
+function tsTypeToFieldType(t: string): string | undefined {
+  const s = t.trim().replace(/\s*\|\s*(undefined|null)\b/g, "").trim();
+  if (!s) return undefined;
+  if (/^string(\[\])?$/.test(s) && !s.includes("[]")) return "string";
+  if (/^number$/.test(s)) return "number";
+  if (/^boolean$/.test(s)) return "boolean";
+  if (/\[\]$/.test(s) || /^Array\s*</.test(s) || /^(string|number)\[\]$/.test(s)) return "array";
+  if (/^Date\b/.test(s) || /\bTimestamp\b/.test(s)) return "timestamp";
+  if (/^Record\s*</.test(s) || /^\{/.test(s) || /^Map\s*</.test(s)) return "map";
+  if (/DocumentReference|Ref$/.test(s)) return "reference";
+  if (/^string\[\]$/.test(s)) return "array";
+  return undefined; // leave unknown so a write-inferred type can win
+}
+
+// ── Firestore naming heuristics ───────────────────────────────────────────────
+
+function isKeyField(name: string): boolean {
+  return name === "id" || /Id$/.test(name) || /Ids$/.test(name);
+}
+
+// The column that an FK should target inside the referenced collection.
+function idColumnOf(coll: FsCollection): string | undefined {
+  if (coll.fields.has("id")) return "id";
+  return undefined; // anchor on the table node itself
+}
+
+// Map a reference-shaped field name to the bare collection it likely points at.
+// `campaignId` → "campaign", `playerIds` → "player", plus common aliases.
+function referencedCollection(field: string): string | null {
+  const aliases: Record<string, string> = {
+    gmId: "gm",
+    authorId: "author",
+    createdBy: "user",
+    updatedBy: "user",
+    sharedWithUserId: "user",
+  };
+  if (field in aliases) return aliases[field];
+  let m = field.match(/^([a-z][\w]*?)Ids$/);
+  if (m) return m[1];
+  m = field.match(/^([a-z][\w]*?)Id$/);
+  if (m) return m[1];
+  return null;
+}
+
+// Resolve a singular referent (e.g. "campaign") to an actual collection name,
+// trying the common pluralizations Firestore code uses.
+function resolveReferent(referent: string, collByName: Map<string, FsCollection>): string | null {
+  const lc = referent.toLowerCase();
+  const candidates = [
+    referent,
+    lc,
+    `${referent}s`,
+    `${lc}s`,
+    `${referent}es`,
+    `${lc}es`,
+    lc.endsWith("y") ? `${lc.slice(0, -1)}ies` : "",
+  ].filter(Boolean);
+  for (const c of candidates) {
+    if (collByName.has(c)) return c;
+  }
+  // Case-insensitive sweep as a last resort.
+  for (const name of collByName.keys()) {
+    if (name.toLowerCase() === lc || name.toLowerCase() === `${lc}s`) return name;
+  }
+  return null;
+}
+
+// Candidate interface/type names for a collection (campaigns → Campaign).
+function typeNameCandidates(coll: string): string[] {
+  const cap = (s: string) => (s ? s[0].toUpperCase() + s.slice(1) : s);
+  const out = new Set<string>();
+  out.add(cap(coll));
+  if (coll.endsWith("ies")) out.add(cap(coll.slice(0, -3) + "y"));
+  if (coll.endsWith("es")) out.add(cap(coll.slice(0, -2)));
+  if (coll.endsWith("s")) out.add(cap(coll.slice(0, -1)));
+  return [...out];
+}
+
+// ── SqlProvider ───────────────────────────────────────────────────────────────
+//
+// Prisma models, Drizzle pgTable definitions, and raw `CREATE TABLE` from .sql.
+
+export class SqlProvider implements SchemaProvider {
+  db: Db = "sql";
+
+  async detect(): Promise<boolean> {
+    const deps = depNames(await readPackageJson());
+    const sqlDeps = ["pg", "mysql2", "prisma", "@prisma/client", "drizzle-orm", "sequelize", "typeorm", "knex"];
+    if (sqlDeps.some((d) => deps.has(d))) return true;
+    const files = await this.sqlSourceFiles();
+    for (const rel of files) {
+      if (rel.endsWith("schema.prisma")) return true;
+      if (rel.endsWith(".sql")) {
+        const src = await safeRead(rel);
+        if (src && /CREATE\s+TABLE/i.test(src)) return true;
+      }
+      if (isTsLike(rel)) {
+        const src = await safeRead(rel);
+        if (src && /\bpgTable\s*\(|\bmysqlTable\s*\(|\bsqliteTable\s*\(/.test(src)) return true;
+      }
+    }
+    return false;
+  }
+
+  private async sqlSourceFiles(): Promise<string[]> {
+    return walk(REPO_ROOT, (rel) =>
+      rel.endsWith(".prisma") || rel.endsWith(".sql") || isTsLike(rel),
+    );
+  }
+
+  async introspect(opts: { live?: boolean }): Promise<ProviderResult> {
+    const warnings: Warning[] = [];
+    if (opts.live) {
+      warnings.push({ kind: "live-unavailable", detail: "sql live introspection not implemented; using static" });
+    }
+    const tables: TableDef[] = [];
+    const relations: RelationDef[] = [];
+    const seen = new Set<string>();
+
+    for (const rel of await this.sqlSourceFiles()) {
+      const src = await safeRead(rel);
+      if (!src) continue;
+      if (rel.endsWith(".prisma")) {
+        parsePrisma(src, tables, relations, seen);
+      } else if (rel.endsWith(".sql") && /CREATE\s+TABLE/i.test(src)) {
+        parseCreateTable(src, rel, tables, relations, seen, warnings);
+      } else if (isTsLike(rel) && /\b(pg|mysql|sqlite)Table\s*\(/.test(src)) {
+        parseDrizzle(src, tables, seen);
+      }
+    }
+    return { tables, relations, warnings };
+  }
+}
+
+function parsePrisma(src: string, tables: TableDef[], relations: RelationDef[], seen: Set<string>): void {
+  const modelRe = /model\s+([A-Za-z_]\w*)\s*\{/g;
+  let m: RegExpExecArray | null;
+  while ((m = modelRe.exec(src))) {
+    const name = m[1];
+    const open = src.indexOf("{", m.index);
+    const close = matchBrace(src, open);
+    if (close < 0) continue;
+    const body = src.slice(open + 1, close);
+
+    const lines = body.split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("//"));
+    const fields: FieldDef[] = [];
+    // Pass 1: map a scalar FK field → { model, refCol } from @relation lines.
+    // `author User @relation(fields: [authorId], references: [id])`.
+    const fkMap = new Map<string, { model: string; refCol?: string }>();
+    for (const line of lines) {
+      const rel = line.match(/^([A-Za-z_]\w*)\s+([A-Za-z_]\w*)(?:\[\])?\??.*@relation\s*\(([^)]*)\)/);
+      if (!rel) continue;
+      const model = rel[2];
+      const args = rel[3];
+      const fld = args.match(/fields\s*:\s*\[\s*([A-Za-z_]\w*)/);
+      const refs = args.match(/references\s*:\s*\[\s*([A-Za-z_]\w*)/);
+      if (fld) fkMap.set(fld[1], { model, refCol: refs?.[1] });
+    }
+    // Pass 2: scalar fields → columns + FK edges.
+    for (const line of lines) {
+      if (line.startsWith("@@")) continue;
+      const fm = line.match(/^([A-Za-z_]\w*)\s+([A-Za-z_]\w*)(\[\])?(\?)?(.*)$/);
+      if (!fm) continue;
+      const [, fname, ftypeRaw, arr, opt, rest] = fm;
+      // Relation navigation fields (object type, no @relation scalar) aren't
+      // columns — skip emitting them as scalar columns when they're a list.
+      const isModelType = /^[A-Z]/.test(ftypeRaw) && !["String", "Int", "Float", "Boolean", "DateTime", "Json", "Decimal", "BigInt", "Bytes"].includes(ftypeRaw);
+      if (isModelType && (arr || /@relation/.test(rest))) continue; // navigation field
+      const isId = /@id\b/.test(rest);
+      fields.push({
+        name: fname,
+        type: arr ? "array" : prismaType(ftypeRaw),
+        mode: opt ? "NULLABLE" : "REQUIRED",
+        isKey: isId || isKeyField(fname) || undefined,
+      });
+      // FK: explicit @relation mapping wins; else a scalar `<x>Id` convention.
+      const explicit = fkMap.get(fname);
+      if (explicit) {
+        relations.push({
+          db: "sql", kind: "fk-reference",
+          fromTable: name, fromCol: fname,
+          toTable: explicit.model, toCol: explicit.refCol,
+          label: fname, confidence: "high",
+        });
+      } else {
+        const conv = fname.match(/^([A-Za-z_]\w*?)Id$/);
+        if (conv) {
+          const model = conv[1][0].toUpperCase() + conv[1].slice(1);
+          relations.push({
+            db: "sql", kind: "fk-reference",
+            fromTable: name, fromCol: fname,
+            toTable: model, label: fname, confidence: "low",
+          });
+        }
+      }
+    }
+    const key = `sql:${name}`;
+    if (!seen.has(key)) {
+      tables.push({ db: "sql", name, fields });
+      seen.add(key);
+    }
+  }
+}
+
+function prismaType(t: string): string {
+  if (/^String$/.test(t)) return "string";
+  if (/^(Int|Float|Decimal|BigInt)$/.test(t)) return "number";
+  if (/^Boolean$/.test(t)) return "boolean";
+  if (/^DateTime$/.test(t)) return "timestamp";
+  if (/^Json$/.test(t)) return "map";
+  if (/^[A-Z]/.test(t)) return "reference";
+  return "unknown";
+}
+
+function parseCreateTable(
+  src: string,
+  rel: string,
+  tables: TableDef[],
+  relations: RelationDef[],
+  seen: Set<string>,
+  _warnings: Warning[],
+): void {
+  const re = /CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?["`']?([A-Za-z_][\w.]*)["`']?\s*\(/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(src))) {
+    const fqName = m[1];
+    const name = fqName.split(".").pop()!;
+    const open = src.indexOf("(", m.index + m[0].length - 1);
+    const close = matchParen(src, open);
+    if (close < 0) continue;
+    const body = src.slice(open + 1, close);
+    const fields: FieldDef[] = [];
+    for (const rawLine of splitTopLevel(body, ",")) {
+      const line = rawLine.trim();
+      if (!line) continue;
+      const upper = line.toUpperCase();
+      // Inline FK: `FOREIGN KEY (col) REFERENCES other(col)`.
+      const fk = line.match(/FOREIGN\s+KEY\s*\(\s*["`']?(\w+)["`']?\s*\)\s*REFERENCES\s+["`']?(\w+)["`']?\s*\(\s*["`']?(\w+)["`']?\s*\)/i);
+      if (fk) {
+        relations.push({
+          db: "sql", kind: "fk-reference",
+          fromTable: name, fromCol: fk[1],
+          toTable: fk[2], toCol: fk[3],
+          label: fk[1], confidence: "high",
+        });
+        continue;
+      }
+      if (/^(PRIMARY|UNIQUE|CONSTRAINT|CHECK|KEY|INDEX)\b/.test(upper)) continue;
+      const cm = line.match(/^["`']?(\w+)["`']?\s+([A-Za-z]+)/);
+      if (!cm) continue;
+      const colName = cm[1];
+      const isKey = /\bPRIMARY\s+KEY\b/i.test(line) || isKeyField(colName);
+      fields.push({
+        name: colName,
+        type: sqlType(cm[2]),
+        mode: /\bNOT\s+NULL\b/i.test(line) ? "REQUIRED" : "NULLABLE",
+        isKey: isKey || undefined,
+      });
+      // Inline column REFERENCES.
+      const colRef = line.match(/REFERENCES\s+["`']?(\w+)["`']?\s*(?:\(\s*["`']?(\w+)["`']?\s*\))?/i);
+      if (colRef) {
+        relations.push({
+          db: "sql", kind: "fk-reference",
+          fromTable: name, fromCol: colName,
+          toTable: colRef[1], toCol: colRef[2],
+          label: colName, confidence: "high",
+        });
+      }
+    }
+    const key = `sql:${name}`;
+    if (!seen.has(key)) {
+      tables.push({ db: "sql", name, fields });
+      seen.add(key);
+    }
+  }
+  void rel;
+}
+
+function sqlType(t: string): string {
+  const u = t.toUpperCase();
+  if (/CHAR|TEXT|UUID|CLOB/.test(u)) return "string";
+  if (/INT|SERIAL|DECIMAL|NUMERIC|REAL|DOUBLE|FLOAT|MONEY/.test(u)) return "number";
+  if (/BOOL/.test(u)) return "boolean";
+  if (/DATE|TIME/.test(u)) return "timestamp";
+  if (/JSON/.test(u)) return "map";
+  if (/ARRAY/.test(u)) return "array";
+  return "unknown";
+}
+
+function parseDrizzle(src: string, tables: TableDef[], seen: Set<string>): void {
+  const re = /(?:export\s+)?const\s+\w+\s*=\s*(?:pg|mysql|sqlite)Table\s*\(\s*['"`]([^'"`]+)['"`]\s*,\s*\{/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(src))) {
+    const name = m[1];
+    const open = src.indexOf("{", m.index + m[0].length - 1);
+    const close = matchBrace(src, open);
+    if (close < 0) continue;
+    const body = src.slice(open + 1, close);
+    const fields: FieldDef[] = [];
+    for (const [key, valExpr] of parseObjectKeys(body)) {
+      let type = "unknown";
+      if (valExpr) {
+        if (/\b(varchar|text|char|uuid)\s*\(/.test(valExpr)) type = "string";
+        else if (/\b(integer|serial|bigint|numeric|decimal|real|doublePrecision)\s*\(/.test(valExpr)) type = "number";
+        else if (/\bboolean\s*\(/.test(valExpr)) type = "boolean";
+        else if (/\b(timestamp|date)\s*\(/.test(valExpr)) type = "timestamp";
+        else if (/\bjson(b)?\s*\(/.test(valExpr)) type = "map";
+      }
+      fields.push({ name: key, type, isKey: /\.primaryKey\(/.test(valExpr ?? "") || isKeyField(key) || undefined });
+    }
+    const k = `sql:${name}`;
+    if (!seen.has(k)) {
+      tables.push({ db: "sql", name, fields });
+      seen.add(k);
+    }
+  }
+}
+
+// ── BigQueryProvider (ported from bq-schema.ts BqStaticProvider) ──────────────
+
+const BQ_FIELD_RE =
+  /bigquery\.SchemaField\(\s*["']([a-zA-Z_][a-zA-Z0-9_]*)["']\s*,\s*["']([A-Z0-9_]+)["']\s*(?:,\s*mode\s*=\s*["']([A-Z]+)["'])?\s*(?:,\s*description\s*=\s*((?:["'][\s\S]*?["']\s*)+))?\s*\)/g;
+const BQ_TABLE_REF_RE = /_table_ref\(\s*client\s*,\s*dataset_id\s*,\s*["']([a-z_][a-z0-9_]*)["']\s*\)/;
+const BQ_CLUSTER_RE = /clustering_fields\s*=\s*\[([^\]]*)\]/;
+const BQ_PARTITION_FIELD_RE = /field\s*=\s*["']([a-z_][a-z0-9_]*)["']/;
+// Backticked fully-qualified table literal: `proj.dataset.table`.
+const BQ_FQN_RE = /`[A-Za-z0-9_-]+\.[A-Za-z0-9_]+\.([A-Za-z_][A-Za-z0-9_]*)`/g;
+
+export class BigQueryProvider implements SchemaProvider {
+  db: Db = "bigquery";
+
+  async detect(): Promise<boolean> {
+    const deps = depNames(await readPackageJson());
+    if (deps.has("@google-cloud/bigquery")) return true;
+    for (const rel of await this.bqFiles()) {
+      const src = await safeRead(rel);
+      if (!src) continue;
+      if (rel.endsWith("setup_tables.py") && /bigquery\.SchemaField\(/.test(src)) return true;
+      if (BQ_FQN_RE.test(src)) {
+        BQ_FQN_RE.lastIndex = 0;
+        return true;
+      }
+      BQ_FQN_RE.lastIndex = 0;
+    }
+    return false;
+  }
+
+  private async bqFiles(): Promise<string[]> {
+    return walk(REPO_ROOT, (rel) => rel.endsWith(".py") || rel.endsWith(".sql") || isTsLike(rel));
+  }
+
+  async introspect(opts: { live?: boolean }): Promise<ProviderResult> {
+    const warnings: Warning[] = [];
+    if (opts.live) {
+      // Live seam: ported `bq` CLI INFORMATION_SCHEMA path from bq-schema.ts.
+      // Requires BQ_PROJECT_ID/GOOGLE_CLOUD_PROJECT + ambient gcloud auth; not
+      // assumed here, so fall back to static and warn.
+      warnings.push({
+        kind: "live-unavailable",
+        detail: "bigquery live introspection needs project + gcloud auth; using static",
+      });
+    }
+
+    const tables: TableDef[] = [];
+    const seen = new Set<string>();
+    const fqnNames = new Set<string>();
+
+    for (const rel of await this.bqFiles()) {
+      const src = await safeRead(rel);
+      if (!src) continue;
+
+      if (rel.endsWith("setup_tables.py") && /bigquery\.SchemaField\(/.test(src)) {
+        parseBqSetupTables(src, tables, seen, warnings);
+      }
+      // Generic FQN literal scan across any file.
+      BQ_FQN_RE.lastIndex = 0;
+      let fm: RegExpExecArray | null;
+      while ((fm = BQ_FQN_RE.exec(src))) fqnNames.add(fm[1]);
+    }
+
+    for (const name of fqnNames) {
+      if (!seen.has(`bigquery:${name}`)) {
+        tables.push({ db: "bigquery", name, fields: [] });
+        seen.add(`bigquery:${name}`);
+        warnings.push({
+          kind: "bq-columns-unknown",
+          detail: `${name}: discovered via FQN literal — columns only available with live introspection`,
+        });
+      }
+    }
+
+    return { tables, relations: [], warnings };
+  }
+}
+
+function parseBqSetupTables(src: string, tables: TableDef[], seen: Set<string>, warnings: Warning[]): void {
+  const lines = src.split("\n");
+  const defLines: number[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (/^def\s+create_[a-z0-9_]+_table\s*\(/.test(lines[i])) defLines.push(i);
+  }
+  for (let d = 0; d < defLines.length; d++) {
+    const start = defLines[d];
+    const end = d + 1 < defLines.length ? defLines[d + 1] : lines.length;
+    const body = lines.slice(start, end).join("\n");
+
+    const tref = body.match(BQ_TABLE_REF_RE);
+    if (!tref) continue;
+    const name = tref[1];
+
+    const fields: FieldDef[] = [];
+    BQ_FIELD_RE.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = BQ_FIELD_RE.exec(body))) {
+      fields.push({
+        name: m[1],
+        type: m[2],
+        mode: m[3] ?? "NULLABLE",
+        description: m[4] ? cleanPyStr(m[4]) : undefined,
+        isKey: m[3] === "REQUIRED" && /_id$/.test(m[1]) && /\bPK\b/i.test(m[4] ?? "") || undefined,
+      });
+    }
+    if (fields.length === 0) {
+      warnings.push({ kind: "no-fields-parsed", detail: `${name}: SchemaField declarations not parsed` });
+    }
+    const clusterFields = parsePyList(body.match(BQ_CLUSTER_RE)?.[1]);
+    const partitionField = /time_partitioning|range_partitioning/.test(body)
+      ? body.match(BQ_PARTITION_FIELD_RE)?.[1]
+      : undefined;
+
+    if (!seen.has(`bigquery:${name}`)) {
+      tables.push({
+        db: "bigquery",
+        name,
+        fields,
+        clusterFields: clusterFields.length ? clusterFields : undefined,
+        partitionField,
+      });
+      seen.add(`bigquery:${name}`);
+    }
+  }
+}
+
+function cleanPyStr(raw: string): string {
+  return raw
+    .replace(/["']\s*["']/g, "")
+    .replace(/^["']|["']\s*$/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function parsePyList(inner: string | undefined): string[] {
+  if (!inner) return [];
+  return [...inner.matchAll(/["']([a-z_][a-z0-9_]*)["']/g)].map((m) => m[1]);
+}
+
+// ── Low-level lexer helpers (brace/paren/bracket matching, string skipping) ───
+
+function matchParen(s: string, openIdx: number): number {
+  return matchDelim(s, openIdx, "(", ")");
+}
+function matchBrace(s: string, openIdx: number): number {
+  return matchDelim(s, openIdx, "{", "}");
+}
+function matchBracket(s: string, openIdx: number): number {
+  return matchDelim(s, openIdx, "[", "]");
+}
+
+function matchDelim(s: string, openIdx: number, open: string, close: string): number {
+  let depth = 0;
+  let i = openIdx;
+  const n = s.length;
+  while (i < n) {
+    const ch = s[i];
+    if (ch === "'" || ch === '"' || ch === "`") {
+      i = skipString(s, i);
+      continue;
+    }
+    if (ch === "/" && s[i + 1] === "/") {
+      const nl = s.indexOf("\n", i);
+      i = nl < 0 ? n : nl;
+      continue;
+    }
+    if (ch === "/" && s[i + 1] === "*") {
+      const end = s.indexOf("*/", i);
+      i = end < 0 ? n : end + 2;
+      continue;
+    }
+    if (ch === open) depth++;
+    else if (ch === close) {
+      depth--;
+      if (depth === 0) return i;
+    }
+    i++;
+  }
+  return -1;
+}
+
+// Skip a string literal starting at the opening quote; returns index after the
+// closing quote. Handles escapes and (best-effort) template-literal `${}`.
+function skipString(s: string, i: number): number {
+  const q = s[i];
+  const n = s.length;
+  i++;
+  while (i < n) {
+    const ch = s[i];
+    if (ch === "\\") {
+      i += 2;
+      continue;
+    }
+    if (q === "`" && ch === "$" && s[i + 1] === "{") {
+      const close = matchBrace(s, i + 1);
+      i = close < 0 ? n : close + 1;
+      continue;
+    }
+    if (ch === q) return i + 1;
+    i++;
+  }
+  return n;
+}
+
+// Skip from i to the next top-level comma or closing of the current object,
+// honoring nesting and strings. Returns the comma/end index (points at ',' or n).
+function skipToComma(s: string, i: number): number {
+  let depth = 0;
+  const n = s.length;
+  while (i < n) {
+    const ch = s[i];
+    if (ch === "'" || ch === '"' || ch === "`") {
+      i = skipString(s, i);
+      continue;
+    }
+    if (ch === "{" || ch === "[" || ch === "(") depth++;
+    else if (ch === "}" || ch === "]" || ch === ")") {
+      if (depth === 0) return i;
+      depth--;
+    } else if (ch === "," && depth === 0) {
+      return i;
+    } else if (ch === "/" && s[i + 1] === "/") {
+      const nl = s.indexOf("\n", i);
+      i = nl < 0 ? n : nl;
+      continue;
+    }
+    i++;
+  }
+  return i;
+}
+
+// Skip a full value (used for spreads): from i to next top-level comma.
+function skipValue(s: string, i: number): number {
+  return skipToComma(s, i);
+}
+
+function splitTopLevel(s: string, delim: string): string[] {
+  const out: string[] = [];
+  let depth = 0;
+  let last = 0;
+  let i = 0;
+  const n = s.length;
+  while (i < n) {
+    const ch = s[i];
+    if (ch === "'" || ch === '"' || ch === "`") {
+      i = skipString(s, i);
+      continue;
+    }
+    if (ch === "(" || ch === "{" || ch === "[") depth++;
+    else if (ch === ")" || ch === "}" || ch === "]") depth--;
+    else if (ch === delim && depth === 0) {
+      out.push(s.slice(last, i));
+      last = i + 1;
+    }
+    i++;
+  }
+  out.push(s.slice(last));
+  return out;
+}
+
+function escapeRe(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+async function safeRead(rel: string): Promise<string | null> {
+  try {
+    const buf = await readFile(join(REPO_ROOT, rel), "utf8");
+    if (buf.length > MAX_FILE_BYTES) return buf.slice(0, MAX_FILE_BYTES);
+    return buf;
+  } catch {
+    return null;
+  }
+}
+
+// ── Compose graph ─────────────────────────────────────────────────────────────
+
+const PROVIDERS: SchemaProvider[] = [
+  new FirestoreProvider(),
+  new SqlProvider(),
+  new BigQueryProvider(),
+];
+
+export async function buildSchemasGraph(opts: { live?: boolean } = {}): Promise<SchemasGraph> {
+  const warnings: Warning[] = [];
+  const allTables: TableDef[] = [];
+  const allRelations: RelationDef[] = [];
+  const databases: { db: Db; tables: number }[] = [];
+  let liveRan = false;
+
+  // Run detection for every provider, then introspect only the detected ones.
+  const detected = await Promise.all(
+    PROVIDERS.map(async (p) => ({ p, on: await p.detect().catch(() => false) })),
+  );
+
+  for (const { p, on } of detected) {
+    if (!on) continue;
+    let result: ProviderResult;
+    try {
+      result = await p.introspect({ live: opts.live });
+    } catch (e) {
+      warnings.push({
+        kind: "provider-failed",
+        detail: `${p.db} introspection failed: ${e instanceof Error ? e.message : String(e)}`,
+      });
+      continue;
+    }
+    // Live actually ran only if no live-unavailable warning was emitted.
+    if (opts.live && !result.warnings.some((w) => w.kind === "live-unavailable")) liveRan = true;
+    allTables.push(...result.tables);
+    allRelations.push(...result.relations);
+    for (const w of result.warnings) warnings.push(w);
+    databases.push({ db: p.db, tables: result.tables.length });
+  }
+
+  if (databases.length === 0) {
+    warnings.push({ kind: "no-database", detail: "no Firestore/SQL/BigQuery usage detected" });
+    return {
+      nodes: [],
+      edges: [],
+      meta: {
+        built: new Date().toISOString(),
+        source: "static",
+        counts: { tables: 0, columns: 0, references: 0, joins: 0, subcollections: 0 },
+        warnings,
+        databases,
+      },
+    };
+  }
+
+  const nodes: SchemaNode[] = [];
+  const edges: SchemaEdge[] = [];
+  const seenNodes = new Set<string>();
+  const addNode = (n: SchemaNode) => {
+    if (!seenNodes.has(n.data.id)) {
+      nodes.push(n);
+      seenNodes.add(n.data.id);
+    }
+  };
+
+  const tableId = (db: Db, name: string) => `${db}:${name}`;
+  const colId = (db: Db, table: string, col: string) => `${db}:${table}.${col}`;
+
+  // Index tables for relation resolution and to anchor subcollection subOf ids.
+  const tableByDbName = new Map<string, TableDef>();
+  for (const t of allTables) tableByDbName.set(`${t.db}:${t.name}`, t);
+
+  // Table + column nodes.
+  for (const t of allTables) {
+    const tid = tableId(t.db, t.name);
+    addNode({
+      data: {
+        id: tid,
+        label: t.name,
+        kind: "table",
+        db: t.db,
+        matview: t.matview || undefined,
+        partitionField: t.partitionField,
+        clusterFields: t.clusterFields && t.clusterFields.length ? t.clusterFields : undefined,
+        subOf: t.subOf ? tableId(t.db, t.subOf) : undefined,
+      },
+    });
+    for (const f of t.fields) {
+      addNode({
+        data: {
+          id: colId(t.db, t.name, f.name),
+          label: f.name,
+          kind: "column",
+          db: t.db,
+          parent: tid,
+          fieldType: f.type,
+          mode: f.mode,
+          description: f.description,
+          isKey: f.isKey || undefined,
+        },
+      });
+    }
+  }
+
+  // Edges. Every endpoint must resolve to a real node id; otherwise warn.
+  let ei = 0;
+  const fieldExists = (db: Db, table: string, col: string) =>
+    seenNodes.has(colId(db, table, col));
+
+  for (const r of allRelations) {
+    const srcTableId = tableId(r.db, r.fromTable);
+    const dstTableId = tableId(r.db, r.toTable);
+    if (!seenNodes.has(srcTableId)) {
+      warnings.push({ kind: "dangling-relation", detail: `${r.kind}: source table ${r.fromTable} (${r.db}) not found` });
+      continue;
+    }
+    if (!seenNodes.has(dstTableId)) {
+      warnings.push({ kind: "dangling-relation", detail: `${r.kind}: target table ${r.toTable} (${r.db}) not found` });
+      continue;
+    }
+
+    if (r.kind === "subcollection") {
+      edges.push({
+        data: { id: `e${ei++}`, source: srcTableId, target: dstTableId, kind: "subcollection" },
+      });
+      continue;
+    }
+
+    // fk-reference / joins resolve to columns when both are known, else anchor
+    // on the table node (so the edge is never dangling).
+    let source = srcTableId;
+    let target = dstTableId;
+    if (r.fromCol && fieldExists(r.db, r.fromTable, r.fromCol)) {
+      source = colId(r.db, r.fromTable, r.fromCol);
+    }
+    if (r.toCol && fieldExists(r.db, r.toTable, r.toCol)) {
+      target = colId(r.db, r.toTable, r.toCol);
+    } else if (r.kind === "fk-reference") {
+      // Reference points at the table's identity — anchor on the table node.
+      target = dstTableId;
+    }
+    edges.push({
+      data: {
+        id: `e${ei++}`,
+        source,
+        target,
+        kind: r.kind,
+        label: r.label,
+        confidence: r.confidence,
+        sourceFile: r.sourceFile,
+      },
+    });
+  }
+
+  const tableCount = nodes.filter((n) => n.data.kind === "table").length;
+  const columnCount = nodes.filter((n) => n.data.kind === "column").length;
+  const refCount = edges.filter((e) => e.data.kind === "fk-reference").length;
+  const joinCount = edges.filter((e) => e.data.kind === "joins").length;
+  const subCount = edges.filter((e) => e.data.kind === "subcollection").length;
+
+  const counts: Record<string, number> = {
+    tables: tableCount,
+    columns: columnCount,
+    references: refCount,
+    joins: joinCount,
+    subcollections: subCount,
+  };
+  for (const d of databases) counts[d.db] = d.tables;
+
+  return {
+    nodes,
+    edges,
+    meta: {
+      built: new Date().toISOString(),
+      source: liveRan ? "live" : "static",
+      counts,
+      warnings,
+      databases,
+    },
+  };
+}

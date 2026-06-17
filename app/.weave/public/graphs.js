@@ -1,4 +1,6 @@
-// Cytoscape graph viewer for tickets / repo-map / skills / ai / adrs.
+// Cytoscape graph viewer for tickets / dataflow / schemas / ai / adrs.
+
+import { escapeHtml as escHtml } from "/components/html-utils.js";
 
 if (window.cytoscape && window.cytoscapeDagre) cytoscape.use(cytoscapeDagre);
 
@@ -6,8 +8,8 @@ const $ = (s) => document.querySelector(s);
 let cy = null;
 
 function currentKind() {
-  const m = location.pathname.match(/^\/graphs\/(tickets|repo-map|skills|ai)/);
-  return m ? m[1] : "repo-map";
+  const m = location.pathname.match(/^\/graphs\/(tickets|dataflow|schemas|ai)/);
+  return m ? m[1] : "dataflow";
 }
 
 // Cytoscape doesn't read CSS custom properties, so we maintain a JS
@@ -40,6 +42,13 @@ const C_LIGHT = {
   bqFill: "#fde0cf",  sqlFill: "#fdf0c8",
   specializedFill: "#dceedb",
   actionFill: "#fbdada", utilityFill: "#d4ebec",
+  // Schemas graph — one hue per database (soft fills so an expanded table
+  // compound reads as a single tinted region). Mirror dark variants below.
+  dbFirestoreFill: "#dceedb", dbFirestoreBorder: "#40a02b",
+  dbSqlFill:       "#fdf0c8", dbSqlBorder:       "#df8e1d",
+  dbBigqueryFill:  "#fde0cf", dbBigqueryBorder:  "#fe640b",
+  schemaTableFill: "#f4efe2",
+  schemaColumnFill: "#faf8f3", schemaColumnBorder: "#9a9285",
   // ADR status palette — mirrors --adr-* CSS tokens (TKT-208 + TKT-216).
   // Categorical; do NOT reuse --bucket-* / bucket*Fill.
   adrProposed:   "#d4a64a", adrProposedFill:   "#f8e8c0",
@@ -89,6 +98,11 @@ const C_DARK = {
   bqFill: "#4a2e1a",  sqlFill: "#4a3a1a",
   specializedFill: "#2a4226",
   actionFill: "#4a2828", utilityFill: "#1f3a3c",
+  dbFirestoreFill: "#2a4226", dbFirestoreBorder: "#a6e3a1",
+  dbSqlFill:       "#4a3a1a", dbSqlBorder:       "#f9e2af",
+  dbBigqueryFill:  "#4a2e1a", dbBigqueryBorder:  "#fab387",
+  schemaTableFill: "#28251f",
+  schemaColumnFill: "#211e1a", schemaColumnBorder: "#9a9285",
   // ADR status palette — dark variants.
   adrProposed:   "#d4a64a", adrProposedFill:   "#4a3a1a",
   adrAccepted:   "#4caf6f", adrAcceptedFill:   "#1d3a25",
@@ -477,6 +491,86 @@ function makeStyle() {
   { selector: 'edge[kind="contains"]', style: { "line-color": C.border, "target-arrow-color": C.border, "line-style": "dotted", opacity: 0.35, width: 1, "target-arrow-shape": "none" } },
   { selector: 'edge[kind="imports"]',  style: { "line-color": C.blue,   "target-arrow-color": C.blue,   opacity: 0.6,  width: 1.1 } },
 
+  // ── Dataflow view ─────────────────────────────────────────────────────
+  // Architecture diagram: frontend route → container · endpoint → data store.
+  {
+    selector: 'node[kind="fe-route"]',
+    style: {
+      shape: "round-rectangle", "background-color": C.paper, "border-color": C.ink,
+      "border-width": 1, width: "label", height: 18, padding: 6, "font-size": 10,
+      color: C.ink, "text-valign": "center", "text-halign": "center", "text-margin-y": 0,
+    },
+  },
+  { selector: 'node[kind="fe-route"][?cached]', style: { "border-color": C.blue, "border-width": 1.4 } },
+  // Deploy container (the backend service the endpoints run in).
+  {
+    selector: 'node[kind="container"]',
+    style: {
+      shape: "round-rectangle", "background-color": C.aiClusterFill, "border-color": C.muted,
+      "border-width": 1.8, width: "label", height: 26, padding: 10, "font-size": 11,
+      "font-weight": 600, color: C.ink, "text-valign": "center", "text-halign": "center", "text-margin-y": 0,
+    },
+  },
+  // Access endpoints — server actions (mauve) vs API routes (blue).
+  {
+    selector: 'node[kind="endpoint"]',
+    style: {
+      shape: "round-rectangle", "background-color": C.apiFill, "border-color": C.mauve,
+      "border-width": 1, width: "label", height: 18, padding: 6, "font-size": 10,
+      color: C.mauve, "text-valign": "center", "text-halign": "center", "text-margin-y": 0,
+    },
+  },
+  { selector: 'node[kind="endpoint"][access="api-route"]', style: { "background-color": C.analyticsFill, "border-color": C.blue, color: C.blue } },
+  // Data stores — barrel, coloured per database.
+  {
+    selector: 'node[kind="store"]',
+    style: {
+      shape: "barrel", "background-color": C.specializedFill, "border-color": C.green,
+      "border-width": 1.4, width: "label", height: 22, padding: 8, "font-size": 11,
+      color: C.green, "text-valign": "center", "text-halign": "center", "text-margin-y": 0,
+    },
+  },
+  { selector: 'node[kind="store"][db="firestore"]', style: { "background-color": C.dbFirestoreFill, "border-color": C.dbFirestoreBorder, color: C.dbFirestoreBorder } },
+  { selector: 'node[kind="store"][db="sql"]',       style: { "background-color": C.dbSqlFill,       "border-color": C.dbSqlBorder,       color: C.dbSqlBorder } },
+  { selector: 'node[kind="store"][db="bigquery"]',  style: { "background-color": C.dbBigqueryFill,  "border-color": C.dbBigqueryBorder,  color: C.dbBigqueryBorder } },
+  // Dataflow edges.
+  { selector: 'edge[kind="fetch"]', style: { "line-color": C.muted, "target-arrow-color": C.muted, opacity: 0.55 } },
+  { selector: 'edge[kind="fetch"][?cached]', style: { "line-color": C.blue, "target-arrow-color": C.blue, opacity: 0.8, width: 1.4 } },
+  { selector: 'edge[kind="hosts"]', style: { "line-color": C.border, "target-arrow-color": C.border, "line-style": "dotted", opacity: 0.4, width: 1, "target-arrow-shape": "none" } },
+  { selector: 'edge[kind="reads"]', style: { "line-color": C.peach, "target-arrow-color": C.peach, opacity: 0.5, "line-style": "dashed" } },
+  { selector: 'edge[kind="writes"]', style: { "line-color": C.red, "target-arrow-color": C.red, opacity: 0.85, width: 1.6 } },
+
+  // ── Schemas view ──────────────────────────────────────────────────────
+  // Tables are compound parents (columns are children), coloured per database.
+  {
+    selector: 'node[kind="table"]',
+    style: {
+      shape: "round-rectangle", "background-color": C.schemaTableFill, "background-opacity": 0.45,
+      "border-width": 1.6, "border-color": C.muted, "font-size": 12, "font-weight": 600, color: C.ink,
+      "text-valign": "top", "text-halign": "center", "text-margin-y": -2, padding: 10, "min-width": 40, "min-height": 20,
+    },
+  },
+  { selector: 'node[kind="table"][db="firestore"]', style: { "border-color": C.dbFirestoreBorder, "background-color": C.dbFirestoreFill } },
+  { selector: 'node[kind="table"][db="sql"]',       style: { "border-color": C.dbSqlBorder,       "background-color": C.dbSqlFill } },
+  { selector: 'node[kind="table"][db="bigquery"]',  style: { "border-color": C.dbBigqueryBorder,  "background-color": C.dbBigqueryFill } },
+  { selector: 'node[kind="table"][?matview]', style: { "border-style": "dashed" } },
+  // Collapsed table — solid pill, not a hollow cluster region (.collapsed toggled by applySchemaCollapse()).
+  { selector: 'node[kind="table"].collapsed', style: { "background-opacity": 1, "text-valign": "center", "text-margin-y": 0, height: 22, width: "label" } },
+  // Columns (children).
+  {
+    selector: 'node[kind="column"]',
+    style: {
+      shape: "ellipse", width: 12, height: 12, "background-color": C.schemaColumnFill, "border-color": C.schemaColumnBorder,
+      "border-width": 1, "font-size": 8, color: C.muted, "text-valign": "center", "text-halign": "right", "text-margin-x": 3,
+    },
+  },
+  { selector: 'node[kind="column"][?isKey]', style: { shape: "diamond", width: 14, height: 14, "border-width": 1.6, "border-color": C.peach, color: C.ink } },
+  // Schema edges: joins (SQL/BQ), fk-reference (cross-table refs), subcollection (Firestore nesting).
+  { selector: 'edge[kind="joins"]', style: { "line-color": C.teal, "target-arrow-color": C.teal, "target-arrow-shape": "none", opacity: 0.7, width: 1.5, label: "data(label)", "font-size": 7, color: C.muted, "text-rotation": "autorotate", "text-background-color": C.paper, "text-background-opacity": 0.7 } },
+  { selector: 'edge[kind="joins"][confidence="low"]', style: { "line-style": "dashed", opacity: 0.4, width: 1 } },
+  { selector: 'edge[kind="fk-reference"]', style: { "line-color": C.mauve, "target-arrow-color": C.mauve, "target-arrow-shape": "triangle", "line-style": "solid", opacity: 0.85, width: 1.6, label: "data(label)", "font-size": 7, color: C.muted, "text-rotation": "autorotate", "text-background-color": C.paper, "text-background-opacity": 0.7 } },
+  { selector: 'edge[kind="subcollection"]', style: { "line-color": C.green, "target-arrow-color": C.green, "target-arrow-shape": "triangle-tee", "line-style": "dotted", opacity: 0.75, width: 1.4 } },
+
   // ── Faded (dimmed) state — used by focus / text filter ───────────────
   { selector: ".faded", style: { opacity: 0.08, "text-opacity": 0.1 } },
   { selector: "edge.faded", style: { opacity: 0.04 } },
@@ -539,15 +633,24 @@ function defaultLayout(_kind) {
 
 function runLayout() {
   if (!cy) return;
-  cy.layout(layoutOpts($("#layout").value)).run();
+  let name = $("#layout").value;
+  // dagre cannot lay out compound (parent) nodes — on the schemas graph an
+  // expanded table is a compound parent of its columns, so fall back to cose
+  // whenever column nodes are present.
+  if (currentKind() === "schemas" && name === "dagre" && cy.nodes('[kind="column"]').length > 0) {
+    name = "cose";
+  }
+  cy.layout(layoutOpts(name)).run();
 }
 
 // ── Manual node-position persistence (localStorage, per-graph-kind) ─────────
 // Dagre recomputes every load, throwing away any manual drag. We snapshot
 // node x/y on drag-release into localStorage and re-apply on load so a
 // hand-arranged graph survives a refresh.
-function positionsEnabled(_kind) {
-  return true;
+function positionsEnabled(kind) {
+  // The schemas graph rebuilds its compound table/column set on every
+  // expand/collapse, so saved absolute positions would fight the live layout.
+  return kind !== "schemas";
 }
 function posKey(kind) {
   return `weave:positions:${kind}`;
@@ -597,11 +700,15 @@ async function load(rebuild = false) {
   const url = `/api/graphs/${kind}${rebuild ? "?rebuild=1" : ""}`;
   const data = await fetch(url).then((r) => r.json());
   if (cy) cy.destroy();
+  // schemas ships every column as a compound child in the initial payload; use
+  // a compound-safe layout for the first paint (setupSchema collapses + re-lays
+  // out immediately) so dagre never sees compound nodes.
+  const initLayout = kind === "schemas" ? "grid" : $("#layout").value;
   cy = cytoscape({
     container: $("#cy"),
     elements: [...(data.nodes ?? []), ...(data.edges ?? [])],
     style: makeStyle(),
-    layout: layoutOpts($("#layout").value),
+    layout: layoutOpts(initLayout),
     wheelSensitivity: 0.2,
   });
   cy.on("tap", "node", (e) => {
@@ -610,22 +717,23 @@ async function load(rebuild = false) {
       location.href = `/ticket/${id}`;
       return;
     }
+    if (kind === "schemas") {
+      onSchemaNodeTap(e.target);
+      return;
+    }
     focusLineage(e.target);
   });
   cy.on("tap", (e) => {
     if (e.target === cy) {
       clearFocus();
+      if (kind === "schemas") hideInspector();
     }
   });
   // Grabbing a node (mouse-down to drag) should dismiss the hover card so it
   // doesn't sit stuck over the graph while you reposition. positionTooltip
   // no-ops while hidden, so it stays gone for the whole drag.
   cy.on("grab", "node", hideSkillTooltip);
-  if (kind === "skills") {
-    cy.on("mouseover", "node", (e) => showSkillTooltip(e.target, e.originalEvent));
-    cy.on("mousemove", "node", (e) => positionTooltip(e.originalEvent));
-    cy.on("mouseout", "node", hideSkillTooltip);
-  }
+  if (kind === "schemas") setupSchema(data);
   if (kind === "ai") {
     cy.on("mouseover", "node", (e) => showAiTooltip(e.target, e.originalEvent));
     cy.on("mousemove", "node", (e) => positionTooltip(e.originalEvent));
@@ -637,9 +745,9 @@ async function load(rebuild = false) {
     cy.on("mouseout", "node", hideSkillTooltip);
   }
   const line = infoLine(kind, data);
-  // The AI graph embeds a clickable warn pill (`<span class="warn-pill">`)
+  // The AI + schemas graphs embed a clickable warn pill (`<span class="warn-pill">`)
   // so we render as HTML there. Other graphs stay textContent for safety.
-  if (kind === "ai") $("#info").innerHTML = line;
+  if (kind === "ai" || kind === "schemas") $("#info").innerHTML = line;
   else $("#info").textContent = line;
   $("#info").dataset.fullLine = line;
   applyTextFilter();
@@ -706,11 +814,6 @@ function getSkillTooltip() {
   tooltipEl.hidden = true;
   document.body.appendChild(tooltipEl);
   return tooltipEl;
-}
-function escHtml(s) {
-  return String(s ?? "").replace(/[&<>"']/g, (c) => ({
-    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
-  })[c]);
 }
 function showSkillTooltip(node, evt) {
   const d = node.data();
@@ -825,24 +928,178 @@ function showAiTooltip(node, evt) {
   positionTooltip(evt);
 }
 
+// ── Schemas interactive subsystem (collapse/expand tables + field inspector) ──
+// Tables are compound parents of their columns; collapsed by default. Column-
+// level fk/join edges get deduped table↔table "proxy" edges so a relationship
+// still shows when a table is collapsed. Firestore `subcollection` edges are
+// already table→table and stay visible in every state.
+let schemaState = null;
+
+function setupSchema(data) {
+  const colNodes = (data.nodes ?? []).filter((n) => n.data.kind === "column");
+  const colToTable = new Map(colNodes.map((n) => [n.data.id, n.data.parent]));
+  const colEdges = (data.edges ?? []).filter(
+    (e) => e.data.kind === "joins" || e.data.kind === "fk-reference",
+  );
+
+  // Preserve the bare table name before the chevron relabel overwrites `label`.
+  cy.nodes('[kind="table"]').forEach((t) => {
+    if (t.data("name") == null) t.data("name", t.data("label"));
+  });
+
+  // Deduped table↔table proxy edges (one per pair+kind), strongest confidence wins.
+  const proxyByKey = new Map();
+  for (const e of colEdges) {
+    const a = colToTable.get(e.data.source);
+    const b = colToTable.get(e.data.target);
+    if (!a || !b || a === b) continue;
+    const [s, t] = [a, b].sort();
+    const key = `${s}|${t}|${e.data.kind}`;
+    const prev = proxyByKey.get(key);
+    const conf = e.data.confidence === "low" && prev?.conf !== "high" ? "low" : "high";
+    proxyByKey.set(key, { s, t, kind: e.data.kind, conf });
+  }
+  const proxyDefs = [...proxyByKey.entries()].map(([key, v]) => ({
+    data: { id: `proxy:${key}`, source: v.s, target: v.t, kind: v.kind, proxy: true, confidence: v.conf },
+  }));
+  cy.add(proxyDefs);
+
+  schemaState = { colNodes, colEdges, colToTable, expanded: new Set() };
+
+  // Collapse everything by default: remove all column children.
+  cy.remove(cy.nodes('[kind="column"]'));
+  applySchemaCollapse();
+}
+
+function applySchemaCollapse() {
+  if (!schemaState || !cy) return;
+  const { colNodes, colEdges, expanded } = schemaState;
+  cy.batch(() => {
+    cy.nodes('[kind="table"]').forEach((t) => {
+      const isExp = expanded.has(t.data("id"));
+      t.toggleClass("collapsed", !isExp);
+      const mv = t.data("matview") ? " ⊳" : "";
+      t.data("label", `${isExp ? "▾" : "▸"} ${t.data("name") ?? t.data("id")}${mv}`);
+    });
+    const present = new Set(
+      colNodes.filter((n) => expanded.has(n.data.parent)).map((n) => n.data.id),
+    );
+    cy.nodes('[kind="column"]').forEach((n) => {
+      if (!present.has(n.data("id"))) cy.remove(n);
+    });
+    for (const n of colNodes) {
+      if (present.has(n.data.id) && cy.getElementById(n.data.id).length === 0) cy.add(n);
+    }
+    for (const e of colEdges) {
+      if (present.has(e.data.source) && present.has(e.data.target) && cy.getElementById(e.data.id).length === 0) {
+        cy.add(e);
+      }
+    }
+    // Proxy table↔table edges: visible only when at least one side is collapsed.
+    cy.edges("[?proxy]").forEach((pe) => {
+      const bothExpanded = expanded.has(pe.data("source")) && expanded.has(pe.data("target"));
+      pe.style("display", bothExpanded ? "none" : "element");
+    });
+  });
+  runLayout();
+}
+
+function onSchemaNodeTap(node) {
+  const kind = node.data("kind");
+  if (kind === "table") {
+    const id = node.data("id");
+    if (schemaState.expanded.has(id)) schemaState.expanded.delete(id);
+    else schemaState.expanded.add(id);
+    applySchemaCollapse();
+    showInspector(node);
+  } else if (kind === "column") {
+    showInspector(node);
+  }
+}
+
+let inspectorEl = null;
+function getInspector() {
+  if (inspectorEl) return inspectorEl;
+  inspectorEl = document.createElement("div");
+  inspectorEl.className = "weave-tt bq-inspector";
+  inspectorEl.style.cssText =
+    "position:fixed;top:150px;left:16px;width:300px;max-height:70vh;overflow:auto;z-index:50;padding:12px 14px;";
+  inspectorEl.addEventListener("click", (e) => {
+    if (e.target instanceof Element && e.target.classList.contains("bqi-close")) hideInspector();
+  });
+  document.body.appendChild(inspectorEl);
+  return inspectorEl;
+}
+function hideInspector() {
+  if (inspectorEl) inspectorEl.hidden = true;
+}
+function inspectorHead(kindLabel, name, state) {
+  return `<div class="bqi-head"><div><span class="bqi-kind">${escHtml(kindLabel)}</span> <code>${escHtml(name)}</code>${state ? ` <span class="weave-tt-muted">${escHtml(state)}</span>` : ""}</div><button class="bqi-close" title="close">×</button></div>`;
+}
+function showInspector(node) {
+  const d = node.data();
+  const el = getInspector();
+  let html = "";
+  if (d.kind === "table") {
+    const cols = schemaState.colNodes.filter((n) => n.data.parent === d.id);
+    const meta = [
+      d.db ? `db: ${escHtml(d.db)}` : "",
+      d.subOf ? `subcollection of ${escHtml(String(d.subOf).replace(/^[a-z]+:/, ""))}` : "",
+      d.matview ? "materialized view" : "",
+      d.partitionField ? `partition: ${escHtml(d.partitionField)}` : "",
+      d.clusterFields ? `cluster: ${escHtml(d.clusterFields.join(", "))}` : "",
+    ].filter(Boolean).join(" · ");
+    const rows = cols.length
+      ? cols.map((c) => {
+          const cd = c.data;
+          const key = cd.isKey ? ' <span style="color:var(--peach,#fe640b)">◆</span>' : "";
+          const desc = cd.description ? `<div class="weave-tt-muted" style="margin:0 0 4px 0;font-size:10px">${escHtml(cd.description)}</div>` : "";
+          return `<li style="margin:3px 0"><code>${escHtml(cd.label)}</code>${key} <span class="weave-tt-muted">${escHtml(cd.fieldType ?? "")}${cd.mode === "REQUIRED" ? " ·req" : ""}</span>${desc}</li>`;
+        }).join("")
+      : `<li class="weave-tt-muted">no columns parsed for this table</li>`;
+    html = `
+      ${inspectorHead("table", d.name ?? d.id, schemaState.expanded.has(d.id) ? "expanded" : "collapsed")}
+      <div class="weave-tt-meta"><span class="weave-tt-muted">${meta}</span></div>
+      <div class="weave-tt-muted" style="margin:6px 0 2px;font-size:10px">${cols.length} columns${schemaState.expanded.has(d.id) ? "" : " · click the table to show them on the graph"}</div>
+      <ul style="list-style:none;padding:0;margin:0">${rows}</ul>`;
+  } else {
+    const conns = schemaState.colEdges
+      .filter((e) => e.data.source === d.id || e.data.target === d.id)
+      .map((e) => {
+        const other = e.data.source === d.id ? e.data.target : e.data.source;
+        const verb = e.data.kind === "fk-reference" ? "→ references" : "↔ joins";
+        const low = e.data.confidence === "low" ? " <span class='weave-tt-muted'>(low-conf)</span>" : "";
+        return `<li style="margin:3px 0">${verb} <code>${escHtml(other)}</code>${low}</li>`;
+      }).join("");
+    html = `
+      ${inspectorHead("column", d.label, "")}
+      <div class="weave-tt-meta"><span class="weave-tt-muted">${escHtml(d.fieldType ?? "")} · ${escHtml(d.mode ?? "")}${d.isKey ? " · key ◆" : ""}</span></div>
+      ${d.description ? `<div class="weave-tt-next" style="border-top:none;padding-top:4px;margin-top:4px">${escHtml(d.description)}</div>` : ""}
+      ${conns ? `<div class="weave-tt-muted" style="margin:6px 0 2px;font-size:10px">connections</div><ul style="list-style:none;padding:0;margin:0">${conns}</ul>` : ""}`;
+  }
+  el.innerHTML = html;
+  el.hidden = false;
+}
+
 function infoLine(kind, data) {
   const n = (data.nodes ?? []).length;
   const e = (data.edges ?? []).length;
   const built = data.meta?.built?.slice(0, 16).replace("T", " ") ?? "?";
-  if (kind === "repo-map") {
+  if (kind === "dataflow") {
     const c = data.meta?.counts ?? {};
     const w = data.meta?.warnings?.length ?? 0;
-    const langs = Object.keys(c)
-      .filter((k) => !["dirs", "files", "totalFiles", "imports"].includes(k))
-      .map((k) => `${c[k]} ${k}`)
-      .join(" · ");
-    return `${c.totalFiles ?? n} files · ${c.dirs ?? 0} dirs · ${c.imports ?? 0} imports${langs ? " · " + langs : ""}${w ? ` · ${w} warn` : ""} · ${built}`;
+    return `${c.routes ?? 0} routes · ${c.containers ?? 0} containers · ${c.endpoints ?? 0} endpoints · ${c.stores ?? 0} stores · ${e} edges · ${w} warn · ${built}`;
   }
-  if (kind === "skills") {
+  if (kind === "schemas") {
     const c = data.meta?.counts ?? {};
     const w = data.meta?.warnings?.length ?? 0;
-    const edgeBreakdown = `${c.parentEdges ?? 0}p/${c.handoffEdges ?? 0}h`;
-    return `${c.skills ?? 0} skills · ${c.orchestrators ?? 0} orchestrators · ${c.leaves ?? 0} leaves · ${c.edges ?? 0} edges (${edgeBreakdown}) · ${c.orphans ?? 0} orphans · ${w} warn · ${built}`;
+    window.__weaveWarnings = data.meta?.warnings ?? [];
+    const src = data.meta?.source ?? "static";
+    const dbs = (data.meta?.databases ?? []).map((d) => d.db).join(" / ") || "none";
+    const warnHtml = w > 0
+      ? ` · <span class="warn-pill" title="click for details" style="cursor:pointer;text-decoration:underline dotted">${w} warn</span>`
+      : ` · 0 warn`;
+    return `${c.tables ?? 0} tables · ${c.columns ?? 0} cols · ${c.references ?? 0} refs · ${c.subcollections ?? 0} subcoll · ${dbs} · ${src}${warnHtml} · ${built}`;
   }
   if (kind === "ai") {
     const c = data.meta?.counts ?? {};
@@ -900,7 +1157,7 @@ function clearFocusClasses() {
 $("#layout").value = defaultLayout(currentKind());
 
 // Reveal the legend matching the current kind; hide the others.
-for (const k of ["tickets", "repo-map", "skills", "ai"]) {
+for (const k of ["tickets", "dataflow", "schemas", "ai"]) {
   const el = document.getElementById(`legend-${k}`);
   if (el) el.hidden = k !== currentKind();
 }
@@ -915,7 +1172,7 @@ if (currentKind() === "ai") {
 // Edge-mode filter only makes sense on /graphs/skills (parent/handoff/cite
 // taxonomy). Show the control there, leave it hidden everywhere else.
 const edgeModeLabel = document.getElementById("edge-mode-label");
-if (edgeModeLabel) edgeModeLabel.hidden = currentKind() !== "skills";
+if (edgeModeLabel) edgeModeLabel.hidden = true;
 
 function applyEdgeMode() {
   if (!cy) return;
@@ -939,9 +1196,9 @@ for (const a of document.querySelectorAll("#subnav a")) {
 // doubles as the click instruction so it's always visible, not buried in the
 // collapsed legend.
 const GRAPH_TITLES = {
-  "repo-map":  ["Repo map", "directories · files · relative-import edges across your codebase · click a node to focus its lineage"],
   tickets:     ["Tickets", "depends_on · blocks · related across the .tickets board · click a node to open it"],
-  skills:      ["Skills", "skill orchestration (connects_to / kind) · click a node to focus its lineage"],
+  dataflow:    ["Dataflow", "frontend route → container · endpoint → database · click a node to focus its lineage"],
+  schemas:     ["Schemas", "databases · tables × columns × relationships · click a table (▸) to expand its columns · click any node for field details"],
   ai:          ["AI ecosystem", "skills · agents · hooks · MCP · tools · click a node to focus its lineage"],
 };
 {

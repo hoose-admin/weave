@@ -241,9 +241,7 @@ Note in the Context section (or in `files_touched` once known) the repo-relative
 ### Procedure
 
 1. Find the ticket file by ID across all stage folders. If the user gave only a title or fuzzy reference, list candidates and confirm.
-2. Move the file with `git mv` IF the file is tracked by git — otherwise use `mv`. (Per repo CLAUDE.md, this skill never runs `git add` / `git commit` / `git rm`; `git mv` is permitted because it only renames in the working tree without staging when invoked on already-tracked paths. If unsure, use plain `mv` and tell the user to stage manually.)
-
-   Actually, simpler and safer given the repo rule: **always use plain `mv`**. The user will handle git staging.
+2. Move the file with plain `mv` — **always**, never `git mv`. Per repo CLAUDE.md this skill never touches git staging; the user handles `git add` / commit themselves.
 3. Update the `status` field in the ticket's frontmatter to match the destination (`"Todo"` for backlog/staging, `"Stuck"` for stuck, `"In Progress"` for building, `"Testing"` for testing, `"Validating"` for validating, `"Complete"` for complete, `"Archived"` for archive).
 4. If moving to `6-complete`, add a `completed: YYYY-MM-DD` field to the frontmatter (today's date). The `.weave/` server's `archiveStaleComplete()` reads this on every `/api/buckets` poll to decide when to migrate the ticket to `7-archive/`.
 
@@ -914,7 +912,7 @@ Pure-read op. Reads the active stack record + bucket scan, reports per-ticket st
    - Trailer:
      ```
      🤖 Generated with autonomous ticket flow
-     Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+     Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
      ```
 4. **Surface the commit prompt** to the user, verbatim:
    ```

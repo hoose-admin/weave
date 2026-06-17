@@ -999,11 +999,10 @@ export async function buildAiGraph(): Promise<AiGraph> {
     }
   }
 
-  // ── Orphan detection (nodes with no edges, excluding clusters) ─────────
+  // ── Orphan detection (nodes with no edges) ─────────────────────────────
   const touched = new Set<string>();
   for (const e of edges) { touched.add(e.data.source); touched.add(e.data.target); }
   for (const n of nodes) {
-    if (n.data.kind === "cluster") continue;
     if (!touched.has(n.data.id)) n.data.orphan = true;
   }
 
