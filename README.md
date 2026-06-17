@@ -37,8 +37,10 @@ Claude Code is installed) a backlog of real findings from your code.
 ## What `setup.sh` does
 
 1. **Vendors the app** — copies the Bun dashboard into `your-repo/.weave/`.
-2. **Installs the skills + hook** into `your-repo/.claude/`, merging weave's hook
-   into any existing `.claude/settings.json` (idempotent, non-destructive).
+2. **Installs the skills + hook + commands** into `your-repo/.claude/`, merging
+   weave's hook into any existing `.claude/settings.json` (idempotent,
+   non-destructive). Commands include the vendored, stack-agnostic
+   `/security-review` engine (MIT) that the `security` skill wraps.
 3. **Scaffolds the board** — `your-repo/.tickets/` with the 9 lifecycle buckets
    and an `ADRs/` folder.
 4. **Writes `weave.config.json`** and a starter `CLAUDE.md` (only if you don't
@@ -88,7 +90,7 @@ Drag tickets between buckets in the UI, edit them in the browser, or let the
 | `bug-scan` | workflow | Fan-out bug hunt → adversarial verify → files backlog tickets. |
 | `adr-manager` | workflow | Create / transition / link Architecture Decision Records. |
 | `adr-researcher` | audit | Researches a decision and drafts an ADR. |
-| `security` (+ `-frontend` / `-backend` / `-gcp`) | audit | Read-only security audits → severity-ranked findings. |
+| `security` | audit | Wraps the off-the-shelf `/security-review` engine and composes findings into the board (dedup, severity, snapshot diff, auto-draft). |
 | `skill-builder` | utility | Author and audit skills. |
 | `skill-generator` | generator | Bootstrap a skill portfolio for a new repo. |
 | `skill-organizer` | orchestrator | Curate an existing portfolio (merges, renames, retirements). |
@@ -110,6 +112,7 @@ weave/
 │   ├── public/              # vanilla-JS UI (board, ticket editor, Cytoscape graphs)
 │   └── scripts/ticket-cli.ts# next-id / audit-ids / create (headless ticket filing)
 ├── skills/                  # installed into <target>/.claude/skills
+├── commands/                # vendored /security-review engine → <target>/.claude/commands
 └── hooks/skill_reflect.py   # installed into <target>/.claude/hooks
 ```
 

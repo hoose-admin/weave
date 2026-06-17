@@ -172,7 +172,9 @@ This is the **default path** for any ADR that isn't already complete.
      ADR ID. The researcher returns markdown; never writes to disk —
      `adr-manager` owns the write.
    - **U** → no external skill. Read `.tickets/ADRs/` for prior art,
-     walk `backend/` `frontend/` `plans/` `docs/`, scan tickets.
+     scan the repo's primary source directories (whatever the project
+     uses — e.g. `src/`, `backend/`, `frontend/`, `services/`, or the
+     repo root), plus `plans/` and `docs/` if present, scan tickets.
      Synthesize locally.
    - **A** → same pipeline as R, then auto-continue to step 10.
 5. **Build the enriched body.** For every `placeholder` / `empty` / `directive` section, generate content; preserve every `user-written` block. Required sections: **TL;DR** (2–4 sentences); **Context** (cite file paths via symbol refs); **Alternatives considered** (≥2, ideally 3, pros/cons/why-rejected); **Decision (Suggested)** (labeled "Suggested" until accepted); **Consequences** (tickets implied, conventions, risks, blast radius — informs the fan-out); **References** (R mode only — URLs + internal paths cited).

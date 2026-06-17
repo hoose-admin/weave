@@ -65,10 +65,11 @@ mkdir -p "$TARGET/.weave"
 rsync -a --exclude 'cache' --exclude 'node_modules' "$SCRIPT_DIR/app/.weave/" "$TARGET/.weave/"
 
 # ── 2. install skills + hooks, merge settings ────────────────────────────────
-echo "→ installing skills + hooks into $TARGET/.claude"
-mkdir -p "$TARGET/.claude/skills" "$TARGET/.claude/hooks"
+echo "→ installing skills + hooks + commands into $TARGET/.claude"
+mkdir -p "$TARGET/.claude/skills" "$TARGET/.claude/hooks" "$TARGET/.claude/commands"
 rsync -a "$SCRIPT_DIR/skills/" "$TARGET/.claude/skills/"
 rsync -a "$SCRIPT_DIR/hooks/"  "$TARGET/.claude/hooks/"
+rsync -a "$SCRIPT_DIR/commands/" "$TARGET/.claude/commands/"  # vendored /security-review engine
 bun "$SCRIPT_DIR/scripts/merge-settings.ts" "$SCRIPT_DIR/settings.template.json" "$TARGET/.claude/settings.json"
 
 # ── 3. scaffold the .tickets board ───────────────────────────────────────────

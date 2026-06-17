@@ -111,7 +111,7 @@ mode detectable at authoring time.
 
 ## Naming and location
 
-- Slug is kebab-case: `security-backend`, `bug-scan`, `repo-map`.
+- Slug is kebab-case: `adr-manager`, `bug-scan`, `repo-map`.
 - Slug matches the directory under `.claude/skills/<slug>/`.
 - `name:` in frontmatter matches the slug exactly.
 - Max 64 characters.
@@ -282,7 +282,7 @@ Numbered, directive steps. Standing instructions, not narration.
 Wrap-up step (if any).
 ```
 
-Concrete examples: `security-backend/SKILL.md`, `bug-scan/SKILL.md`.
+Concrete examples: `security/SKILL.md`, `bug-scan/SKILL.md`.
 
 ## Body style rules
 
@@ -358,7 +358,7 @@ point is deterministic-as-code, not skill-bloat.)
 
 Long-form reference: SQL probes, severity rules, contracts, config. Many
 skills use this. Examples:
-`security-frontend/references/CHECK_CATALOG.md`,
+`bug-scan/references/CHECK_CATALOG.md`,
 `<layer>-data-integrity-audit/references/probes.sql`.
 
 The skill body should `Read` these on demand, not paraphrase from
@@ -476,7 +476,7 @@ Frontmatter fields:
 
 Distinguish these as an explicit design dimension:
 
-- **Read-only skills** (`security-backend`, `bug-scan`, the audit
+- **Read-only skills** (`security`, `bug-scan`, the audit
   family) — produce reports; never modify state. Safe to auto-invoke.
 - **Reversible writers** (`ticket-manager`, a `migration-runner`) —
   modify state, but in ways the user can undo or re-run. Safe to
@@ -497,7 +497,7 @@ direct invocation is simpler.
 |---|---|---|---|
 | **Router** | "which sibling should I run?" | a hypothetical `backend-router` | User intent is ambiguous and routing logic itself is non-trivial. No own logic — just dispatch. Slug suffix: `-router` per `skill-organizer/references/NAMING_CONVENTION.md`. |
 | **Synthesizer** | "run all siblings, give me one report" | a hypothetical `<domain>-review` | User wants a single consolidated output (typically a senior-engineer-grade markdown report). Runs every sibling, dedups, prioritizes. |
-| **Composer-with-dedup** | "run siblings + add cross-cutting analysis" | `security` | Synthesizer plus snapshot-over-time / cross-source dedup / ticket linkage. Has a `references/SUBSKILL_BOUNDARIES.md` single-owner map. |
+| **Composer-with-dedup** | "run a detection engine + add cross-cutting analysis" | `security` | Composer over the `/security-review` engine's findings: snapshot-over-time / cross-source dedup / ticket linkage. |
 
 ### A cluster can legitimately have BOTH a router AND a synthesizer
 
@@ -512,7 +512,7 @@ The composer-with-dedup pattern can also sit on top of a synthesizer — a compo
 
 ### Existing orchestrators in this repo
 
-- `security` — composer-with-dedup over `security-frontend` / `security-backend` / `security-gcp`.
+- `security` — composer over the `/security-review` engine's findings (dedup, severity bands, snapshot diff, auto-draft into the board).
 - `skill-organizer` — proposer-style orchestrator for portfolio-level skill curation.
 - `skill-generator` — generator that orchestrates a multi-agent bootstrap DAG.
 - `ticket-manager` — self-orchestrating; multiple ops in one skill (utility kind, but routes its own ops).
@@ -548,7 +548,7 @@ These show up across multiple existing skills — adopt when it fits:
 - **Plan-first execution** — a `migration-runner` and an `acme-deploy`
   produce a plan, then prompt for confirmation before executing. Right
   pattern for destructive / expensive actions.
-- **Severity-ranked output** — `security-backend` emits findings as
+- **Severity-ranked output** — `bug-scan` emits findings as
   P0/P1/P2. Easy to scan; orders triage.
 - **Reference-driven answers** — for any non-trivial domain knowledge,
   put it in `references/` and `Read` on demand rather than paraphrasing

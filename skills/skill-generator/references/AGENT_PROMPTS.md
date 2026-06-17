@@ -83,9 +83,10 @@ cross_cutting / deploy_targets:**
 1. Open the cited file via Read.
 2. Confirm the cited line exists and contains content consistent
    with the signal claim. For example, if the signal claims a
-   "Firestore data layer" with cite `backend/api/auth.py:98`, the
-   cited line should reference firestore imports / clients /
-   collections.
+   "<datastore> data layer" with cite `<file>:<line>`, the cited
+   line should reference that datastore's client / import /
+   handle (an ORM model, a SQL client, a driver import, or a
+   collection handle).
 3. If the line exists but content doesn't match, flag as drift.
 4. If the file doesn't exist or has fewer lines than the cite, flag
    as missing.
@@ -98,7 +99,7 @@ cross_cutting / deploy_targets:**
   "failed_cites": [
     {"cite": "file:line", "signal": "...", "reason": "drift|missing|out_of_range"}
   ],
-  "notes": "any patterns observed (e.g. all 3 BENCHMARK signals share the same drift)"
+  "notes": "any patterns observed (e.g. all N signals of the same type share the same drift)"
 }
 
 **Rules:**
@@ -368,7 +369,7 @@ Every spawned subagent runs read-only. The following are explicitly forbidden in
 
 ```
 Bash(rm:*), Bash(rm -rf:*)
-Bash(gcloud:*)              — except: gcloud auth list, gcloud config list
+Block mutating cloud-CLI verbs (e.g. gcloud / aws / az / kubectl); allow only read-only subcommands (auth / config / list / describe)
 Bash(<expensive-cli> query:*)  — non-dry-run query against a metered backend
 Bash(git push:*), Bash(git rm:*), Bash(git reset --hard:*), Bash(git commit:*)
 Bash(bun update:*)
