@@ -379,29 +379,29 @@ main.terminal-page.sidebar-collapsed .term-item-name {
    ttyd iframe underneath (you can keep typing); only the card is interactive. */
 .term-notif-layer {
     position: absolute;
-    top: 10px;
-    right: 10px;
+    top: 16px;
+    right: 16px;
     z-index: 5;
     pointer-events: none;
-    max-width: min(360px, 60%);
+    max-width: min(560px, 80%);
 }
 .term-notif-card {
     pointer-events: auto;
     display: flex;
-    gap: 8px;
+    gap: 14px;
     align-items: flex-start;
-    padding: 10px 12px;
+    padding: 20px 24px;
     background: var(--paper);
     border: 1px solid var(--rule);
-    border-left: 3px solid var(--red);
-    border-radius: 8px;
-    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
+    border-left: 5px solid var(--red);
+    border-radius: 12px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.24);
     font-family: var(--font-mono);
 }
 .term-notif-msg {
     margin: 0;
-    font-size: 0.8rem;
-    line-height: 1.35;
+    font-size: 1.15rem;
+    line-height: 1.45;
     color: var(--ink);
 }
 .term-notif-dismiss {
@@ -409,8 +409,8 @@ main.terminal-page.sidebar-collapsed .term-item-name {
     border: 0;
     background: none;
     cursor: pointer;
-    padding: 0 2px;
-    font-size: 1rem;
+    padding: 0 4px;
+    font-size: 1.5rem;
     line-height: 1;
     color: var(--muted);
 }
