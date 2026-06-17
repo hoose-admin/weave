@@ -1,13 +1,24 @@
 # weave
 
-A local, file-based **Claude Code UI + ticket board + codebase map + (a few Claude Code skills)** you can
-drop into any repo. Clone it, run one setup script against your project, and you
+A local first, no subscription way to develop code using your browser on localhost. Designed for Claude code users.
+Claude Pro subscription required, Max subscription suggested for initial setup. An API key can be used, but thats a much much more expensive way to run this.
+
+This repo has the following features:
+- **Integrated Terminal**: Smart summarization, agent status tracking
+- **Ticket board**: Run in Agentic mode where claude skills and hooks run everything, or user mode where you drive.
+- **Maps**: Visualize your tickets, AI setup (skills-hooks-tasks etc), architecture, and database.
+- **Self improving skills**
+- **Repo analysis and ticket backlog fill**
+
+Drop this into any repo. Clone it, run one setup script against your project, and you
 get a localhost dashboard, a graph of your codebase, and a backlog that fills
 itself from a bug-scan of your own code.
 
 No database. No build pipeline. No external services. Markdown files on disk are
 the source of truth, served by a tiny [Bun](https://bun.sh) process on
 `127.0.0.1`.
+
+There's a '?' symbol in the navbar, click it if you need suggestions.
 
 ---
 
