@@ -1,7 +1,19 @@
 import { join } from "node:path";
 import { readFile, stat, readdir } from "node:fs/promises";
 import { PORT, REPO_ROOT } from "./weave.config.ts";
-import { BUCKETS, listAll, listBucket, readTicket, writeTicket, moveTicket, createTicket, deleteTicket, findTicket, archiveStaleComplete, type Bucket } from "./lib/tickets.ts";
+import {
+  BUCKETS,
+  listAll,
+  listBucket,
+  readTicket,
+  writeTicket,
+  moveTicket,
+  createTicket,
+  deleteTicket,
+  findTicket,
+  archiveStaleComplete,
+  type Bucket,
+} from "./lib/tickets.ts";
 import type { Frontmatter } from "./lib/frontmatter.ts";
 import { buildTicketGraph } from "./lib/graphs/tickets.ts";
 import { buildDataflowGraph } from "./lib/graphs/dataflow.ts";
@@ -29,6 +41,8 @@ import {
   type AdrState,
   type ParsedAdr,
 } from "./lib/adrs.ts";
+import { listSessions, createSession, killSession, readLive } from "./lib/terminals.ts";
+import { capturePane, inferState } from "./lib/terminal-status.ts";
 
 type GraphKind = "tickets" | "dataflow" | "schemas" | "adrs" | "ai";
 
@@ -38,12 +52,12 @@ const CACHE = join(ROOT, "cache");
 
 const MIME: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
-  ".js":   "application/javascript; charset=utf-8",
-  ".css":  "text/css; charset=utf-8",
+  ".js": "application/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
   ".json": "application/json; charset=utf-8",
-  ".svg":  "image/svg+xml",
-  ".ico":  "image/x-icon",
-  ".png":  "image/png",
+  ".svg": "image/svg+xml",
+  ".ico": "image/x-icon",
+  ".png": "image/png",
 };
 
 // Security headers — defense-in-depth on top of the per-sink HTML escaping.
@@ -69,24 +83,59 @@ const HTML_HEADERS = {
   ...NOSNIFF,
 };
 
+// terminal.html frames the terminal surface in an <iframe>. That surface is now
+// weave's own xterm.js client (terminal-xterm.html), served same-origin, so this
+// variant just needs `frame-src 'self'`. The localhost ports stay allowed too
+// (harmless; keeps direct-ttyd framing working as a fallback). Scoped to
+// terminal.html only (see serveStatic).
+const TERMINAL_HTML_HEADERS = {
+  "content-security-policy":
+    CSP + "; frame-src 'self' http://127.0.0.1:* http://localhost:*",
+  "referrer-policy": "no-referrer",
+  ...NOSNIFF,
+};
+
+// The framed client (terminal-xterm.html) opens a WebSocket straight to the
+// session's ttyd port — a different localhost origin — and is itself framed by
+// terminal.html. The default `default-src 'self'` would block both, so this
+// variant widens connect-src to any localhost ws:// and allows same-origin
+// framing. Built fresh (not appended to CSP) because a second `frame-ancestors`
+// directive is ignored — the base CSP already pins it to 'none'.
+const TERMINAL_XTERM_HTML_HEADERS = {
+  "content-security-policy": [
+    "default-src 'self'",
+    "script-src 'self' 'unsafe-inline'",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data:",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "connect-src 'self' ws://127.0.0.1:* ws://localhost:*",
+    "frame-ancestors 'self'",
+  ].join("; "),
+  "referrer-policy": "no-referrer",
+  ...NOSNIFF,
+};
+
 const json = (data: unknown, status = 200) =>
-  new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json", ...NOSNIFF } });
+  new Response(JSON.stringify(data), {
+    status,
+    headers: { "content-type": "application/json", ...NOSNIFF },
+  });
 
 const err = (msg: string, status = 400) => json({ error: msg }, status);
 
 const NAV_ITEMS: ReadonlyArray<{ key: string; href: string; label: string }> = [
-  { key: "board",   href: "/",                 label: "board"  },
-  { key: "graphs",  href: "/graphs/dataflow",  label: "graphs" },
-  { key: "adrs",    href: "/adrs",             label: "adrs"   },
+  { key: "terminal", href: "/terminal", label: ">_" },
+  { key: "board", href: "/", label: "board" },
+  { key: "graphs", href: "/graphs/dataflow", label: "graphs" },
+  { key: "adrs", href: "/adrs", label: "adrs" },
 ];
 
 function renderNavLinks(active: string): string {
-  return NAV_ITEMS
-    .map(({ key, href, label }) => {
-      const cls = key === active ? ' class="active"' : "";
-      return `<a href="${href}"${cls}>${label}</a>`;
-    })
-    .join("\n                ");
+  return NAV_ITEMS.map(({ key, href, label }) => {
+    const cls = key === active ? ' class="active"' : "";
+    return `<a href="${href}"${cls}>${label}</a>`;
+  }).join("\n                ");
 }
 
 // Single source of truth for the dashboard's top navbar. Emits the entire
@@ -133,7 +182,8 @@ function renderNavbar(active: string, withStatus: boolean): string {
 }
 
 // Full-navbar marker. Optional `status` token adds the ticket save-status slot.
-const NAVBAR_MARKER_RE = /<!--\s*weave:navbar(?:\s+active="([\w-]*)")?(?:\s+(status))?\s*-->/g;
+const NAVBAR_MARKER_RE =
+  /<!--\s*weave:navbar(?:\s+active="([\w-]*)")?(?:\s+(status))?\s*-->/g;
 // How-to modal marker — replaced with the shared howto-modal.html partial.
 const HOWTO_MARKER_RE = /<!--\s*weave:howto-modal\s*-->/g;
 const HOWTO_PARTIAL = join(PUBLIC, "howto-modal.html");
@@ -148,19 +198,39 @@ async function renderHowtoModal(): Promise<string> {
 
 async function serveStatic(path: string): Promise<Response> {
   const full = join(PUBLIC, path);
-  if (!full.startsWith(PUBLIC)) return new Response("forbidden", { status: 403 });
+  if (!full.startsWith(PUBLIC))
+    return new Response("forbidden", { status: 403 });
   try {
     const buf = await readFile(full);
     const ext = "." + (path.split(".").pop() ?? "");
     if (ext === ".html") {
       let html = buf.toString("utf8");
       html = html.replace(NAVBAR_MARKER_RE, (_m, active, status) =>
-        renderNavbar(active ?? "", status === "status"));
+        renderNavbar(active ?? "", status === "status"),
+      );
       const modal = await renderHowtoModal();
       html = html.replace(HOWTO_MARKER_RE, () => modal);
-      return new Response(html, { headers: { "content-type": MIME[ext], "cache-control": "no-store", ...HTML_HEADERS } });
+      const htmlHeaders =
+        path === "terminal.html"
+          ? TERMINAL_HTML_HEADERS
+          : path === "terminal-xterm.html"
+            ? TERMINAL_XTERM_HTML_HEADERS
+            : HTML_HEADERS;
+      return new Response(html, {
+        headers: {
+          "content-type": MIME[ext],
+          "cache-control": "no-store",
+          ...htmlHeaders,
+        },
+      });
     }
-    return new Response(buf, { headers: { "content-type": MIME[ext] ?? "application/octet-stream", "cache-control": "no-store", ...NOSNIFF } });
+    return new Response(buf, {
+      headers: {
+        "content-type": MIME[ext] ?? "application/octet-stream",
+        "cache-control": "no-store",
+        ...NOSNIFF,
+      },
+    });
   } catch {
     return new Response("not found", { status: 404 });
   }
@@ -168,9 +238,21 @@ async function serveStatic(path: string): Promise<Response> {
 
 const PROJECT_ROOT = REPO_ROOT;
 
-const IGNORE_DIRS = new Set(["node_modules", "__pycache__", ".next", ".git", ".venv", "venv", "dist", "build"]);
+const IGNORE_DIRS = new Set([
+  "node_modules",
+  "__pycache__",
+  ".next",
+  ".git",
+  ".venv",
+  "venv",
+  "dist",
+  "build",
+]);
 
-async function newestMtime(rootRel: string, predicate: (path: string) => boolean): Promise<number> {
+async function newestMtime(
+  rootRel: string,
+  predicate: (path: string) => boolean,
+): Promise<number> {
   const root = join(PROJECT_ROOT, rootRel);
   let newest = 0;
   const walk = async (dir: string) => {
@@ -225,7 +307,11 @@ async function newestSourceMtime(kind: GraphKind): Promise<number> {
   return 0;
 }
 
-async function readCachedOrBuild(kind: GraphKind, rebuild: boolean, live = false): Promise<unknown> {
+async function readCachedOrBuild(
+  kind: GraphKind,
+  rebuild: boolean,
+  live = false,
+): Promise<unknown> {
   // Live mode (schemas ?live=1) always builds fresh against the real database
   // and is never served from — or written to — the static cache, so the fast
   // offline default stays intact.
@@ -246,11 +332,15 @@ async function readCachedOrBuild(kind: GraphKind, rebuild: boolean, live = false
     }
   }
   const graph =
-    kind === "tickets" ? await buildTicketGraph()
-    : kind === "dataflow" ? await buildDataflowGraph()
-    : kind === "schemas" ? await buildSchemasGraph()
-    : kind === "ai" ? await buildAiGraph()
-    : await (await import("./lib/graphs/adrs.ts")).buildAdrGraph();
+    kind === "tickets"
+      ? await buildTicketGraph()
+      : kind === "dataflow"
+        ? await buildDataflowGraph()
+        : kind === "schemas"
+          ? await buildSchemasGraph()
+          : kind === "ai"
+            ? await buildAiGraph()
+            : await (await import("./lib/graphs/adrs.ts")).buildAdrGraph();
   const { writeFile, mkdir } = await import("node:fs/promises");
   await mkdir(CACHE, { recursive: true });
   await writeFile(file, JSON.stringify(graph, null, 2), "utf8");
@@ -265,12 +355,20 @@ const server = Bun.serve({
     const { pathname } = url;
 
     // Routes
-    if (pathname === "/")                return serveStatic("index.html");
-    if (pathname === "/graphs")          return Response.redirect("/graphs/dataflow", 302);
-    if (/^\/graphs\/(tickets|dataflow|schemas|ai)\/?$/.test(pathname)) return serveStatic("graphs.html");
+    if (pathname === "/") return serveStatic("index.html");
+    if (pathname === "/graphs")
+      return Response.redirect("/graphs/dataflow", 302);
+    if (/^\/graphs\/(tickets|dataflow|schemas|ai)\/?$/.test(pathname))
+      return serveStatic("graphs.html");
     if (pathname.startsWith("/ticket/")) return serveStatic("ticket.html");
-    if (pathname === "/adrs" || pathname === "/adrs/") return serveStatic("adrs.html");
-    if (pathname === "/palette" || pathname === "/palette/") return serveStatic("palette.html");
+    if (pathname === "/adrs" || pathname === "/adrs/")
+      return serveStatic("adrs.html");
+    if (pathname === "/palette" || pathname === "/palette/")
+      return serveStatic("palette.html");
+    if (pathname === "/terminal" || pathname === "/terminal/")
+      return serveStatic("terminal.html");
+    if (pathname === "/terminal-xterm.html")
+      return serveStatic("terminal-xterm.html");
     if (/^\/adrs\/ADR-\d+\/?$/.test(pathname)) return serveStatic("adr.html");
 
     // API
@@ -300,22 +398,41 @@ const server = Bun.serve({
       } catch {
         return err("invalid JSON body");
       }
-      const title = typeof payload.title === "string" ? payload.title.trim() : "";
+      const title =
+        typeof payload.title === "string" ? payload.title.trim() : "";
       if (!title) return err("title is required");
-      const priority = typeof payload.priority === "string" ? payload.priority : "Medium";
-      const domain = typeof payload.domain === "string" ? payload.domain : undefined;
+      const priority =
+        typeof payload.priority === "string" ? payload.priority : "Medium";
+      const domain =
+        typeof payload.domain === "string" ? payload.domain : undefined;
       const body = typeof payload.body === "string" ? payload.body : undefined;
       const csv = (v: unknown): string[] | undefined =>
-        Array.isArray(v) ? v.map(String).map((s) => s.trim()).filter(Boolean)
-        : typeof v === "string" ? v.split(",").map((s) => s.trim()).filter(Boolean)
-        : undefined;
-      const bucket = typeof payload.bucket === "string" ? payload.bucket as Bucket : "scratch";
+        Array.isArray(v)
+          ? v
+              .map(String)
+              .map((s) => s.trim())
+              .filter(Boolean)
+          : typeof v === "string"
+            ? v
+                .split(",")
+                .map((s) => s.trim())
+                .filter(Boolean)
+            : undefined;
+      const bucket =
+        typeof payload.bucket === "string"
+          ? (payload.bucket as Bucket)
+          : "scratch";
       if (!BUCKETS.includes(bucket)) return err(`invalid bucket: ${bucket}`);
       // complexity: optional int 1–5. Absent / "" / "auto" → don't set.
       // Anything else that doesn't coerce to 1–5 is a hard 400.
       let complexity: number | undefined;
       const rawC = payload.complexity;
-      if (rawC !== undefined && rawC !== null && rawC !== "" && rawC !== "auto") {
+      if (
+        rawC !== undefined &&
+        rawC !== null &&
+        rawC !== "" &&
+        rawC !== "auto"
+      ) {
         const n = typeof rawC === "number" ? rawC : parseInt(String(rawC), 10);
         if (!Number.isInteger(n) || n < 1 || n > 5) {
           return err(`invalid complexity: ${rawC} (expected 1–5 or "auto")`);
@@ -350,8 +467,12 @@ const server = Bun.serve({
           return t ? json(t) : err("not found", 404);
         }
         if (req.method === "PUT") {
-          const { frontmatter, body } = (await req.json()) as { frontmatter?: Frontmatter; body?: string };
-          if (!frontmatter || typeof body !== "string") return err("expected {frontmatter, body}");
+          const { frontmatter, body } = (await req.json()) as {
+            frontmatter?: Frontmatter;
+            body?: string;
+          };
+          if (!frontmatter || typeof body !== "string")
+            return err("expected {frontmatter, body}");
           await writeTicket(id, frontmatter, body);
           return json({ ok: true });
         }
@@ -369,12 +490,15 @@ const server = Bun.serve({
     if (moveMatch && req.method === "POST") {
       const id = moveMatch[1];
       const { to } = (await req.json()) as { to?: unknown };
-      if (typeof to !== "string" || !BUCKETS.includes(to as Bucket)) return err(`invalid bucket: ${String(to)}`);
+      if (typeof to !== "string" || !BUCKETS.includes(to as Bucket))
+        return err(`invalid bucket: ${String(to)}`);
       const result = await moveTicket(id, to as Bucket);
       return json(result);
     }
 
-    const graphMatch = pathname.match(/^\/api\/graphs\/(tickets|dataflow|schemas|adrs|ai)$/);
+    const graphMatch = pathname.match(
+      /^\/api\/graphs\/(tickets|dataflow|schemas|adrs|ai)$/,
+    );
     if (graphMatch && req.method === "GET") {
       const kind = graphMatch[1] as GraphKind;
       const rebuild = url.searchParams.get("rebuild") === "1";
@@ -399,22 +523,40 @@ const server = Bun.serve({
       } catch {
         return err("invalid JSON body");
       }
-      const title = typeof payload.title === "string" ? payload.title.trim() : "";
+      const title =
+        typeof payload.title === "string" ? payload.title.trim() : "";
       if (!title) return err("title is required");
       const csv = (v: unknown): string[] =>
-        Array.isArray(v) ? (v as unknown[]).map(String).map((s) => s.trim()).filter(Boolean)
-        : typeof v === "string" ? v.split(",").map((s) => s.trim()).filter(Boolean)
-        : [];
+        Array.isArray(v)
+          ? (v as unknown[])
+              .map(String)
+              .map((s) => s.trim())
+              .filter(Boolean)
+          : typeof v === "string"
+            ? v
+                .split(",")
+                .map((s) => s.trim())
+                .filter(Boolean)
+            : [];
       const deciders = csv(payload.deciders);
       const tags = csv(payload.tags);
       const relatedTickets = csv(payload.related_tickets);
       const supersedes = csv(payload.supersedes);
-      const domain = typeof payload.domain === "string" ? payload.domain : "meta";
-      const bodyOverride = typeof payload.body === "string" && payload.body.trim() ? payload.body : null;
+      const domain =
+        typeof payload.domain === "string" ? payload.domain : "meta";
+      const bodyOverride =
+        typeof payload.body === "string" && payload.body.trim()
+          ? payload.body
+          : null;
       // complexity: optional int 1–5. Absent / "" / "auto" → undefined.
       let complexity: number | undefined;
       const rawC = payload.complexity;
-      if (rawC !== undefined && rawC !== null && rawC !== "" && rawC !== "auto") {
+      if (
+        rawC !== undefined &&
+        rawC !== null &&
+        rawC !== "" &&
+        rawC !== "auto"
+      ) {
         const n = typeof rawC === "number" ? rawC : parseInt(String(rawC), 10);
         if (!Number.isInteger(n) || n < 1 || n > 5) {
           return err(`invalid complexity: ${rawC} (expected 1–5 or "auto")`);
@@ -424,7 +566,11 @@ const server = Bun.serve({
       try {
         const newId = await nextAdrId();
         const today = new Date().toISOString().slice(0, 10);
-        const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 60);
+        const slug = title
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, "-")
+          .replace(/^-|-$/g, "")
+          .slice(0, 60);
         const baseName = `${newId}-${domain}-${slug || "untitled"}`;
         const filename = `${baseName}.md`;
         const { writeFile, mkdir, rm } = await import("node:fs/promises");
@@ -434,24 +580,26 @@ const server = Bun.serve({
         await mkdir(folder, { recursive: true });
         await mkdir(join(folder, "versions"), { recursive: true });
         await mkdir(join(folder, "references"), { recursive: true });
-        const body = bodyOverride ?? [
-          "### TL;DR",
-          "",
-          "<2-4 sentences capturing the decision and why it matters.>",
-          "",
-          "### Decision",
-          "",
-          "<The chosen path, stated explicitly.>",
-          "",
-          "### Consequences",
-          "",
-          "<What follows from the decision: tickets implied, conventions established, risks accepted.>",
-          "",
-          "### Alternatives considered",
-          "",
-          "<What was rejected and why.>",
-          "",
-        ].join("\n");
+        const body =
+          bodyOverride ??
+          [
+            "### TL;DR",
+            "",
+            "<2-4 sentences capturing the decision and why it matters.>",
+            "",
+            "### Decision",
+            "",
+            "<The chosen path, stated explicitly.>",
+            "",
+            "### Consequences",
+            "",
+            "<What follows from the decision: tickets implied, conventions established, risks accepted.>",
+            "",
+            "### Alternatives considered",
+            "",
+            "<What was rejected and why.>",
+            "",
+          ].join("\n");
         const parsed: ParsedAdr = {
           frontmatter: {
             id: newId,
@@ -485,7 +633,10 @@ const server = Bun.serve({
             await mirrorSupersedes(newId, supersedes);
           } catch (mirrorErr) {
             await rm(folder, { recursive: true, force: true }).catch(() => {});
-            return err(`supersedes mirror failed: ${mirrorErr instanceof Error ? mirrorErr.message : String(mirrorErr)} — new ADR ${newId} rolled back`, 500);
+            return err(
+              `supersedes mirror failed: ${mirrorErr instanceof Error ? mirrorErr.message : String(mirrorErr)} — new ADR ${newId} rolled back`,
+              500,
+            );
           }
         }
         return json({ id: newId, filename, folder: baseName, ...parsed }, 201);
@@ -504,14 +655,19 @@ const server = Bun.serve({
         }
         if (req.method === "PUT") {
           const body = await req.json();
-          if (!body || typeof body !== "object") return err("expected {frontmatter, body}");
+          if (!body || typeof body !== "object")
+            return err("expected {frontmatter, body}");
           const fm = (body as { frontmatter?: unknown }).frontmatter;
           const bodyStr = (body as { body?: unknown }).body;
-          if (!fm || typeof bodyStr !== "string") return err("expected {frontmatter, body}");
+          if (!fm || typeof bodyStr !== "string")
+            return err("expected {frontmatter, body}");
           const fmRec = fm as Record<string, unknown>;
           // Refuse id changes.
           if (fmRec.id !== undefined && fmRec.id !== id) {
-            return json({ error: `cannot change id from ${id} to ${fmRec.id}` }, 409);
+            return json(
+              { error: `cannot change id from ${id} to ${fmRec.id}` },
+              409,
+            );
           }
           // Refuse edits from terminal status.
           const existing = await readAdr(id);
@@ -519,7 +675,12 @@ const server = Bun.serve({
           const currentStatus = existing.frontmatter.status ?? "proposed";
           const terminal = new Set(["rejected", "superseded", "deprecated"]);
           if (terminal.has(currentStatus) && fmRec.status !== currentStatus) {
-            return json({ error: `cannot edit from terminal status "${currentStatus}" — use transition or create a superseding ADR` }, 409);
+            return json(
+              {
+                error: `cannot edit from terminal status "${currentStatus}" — use transition or create a superseding ADR`,
+              },
+              409,
+            );
           }
           await writeAdr(id, { frontmatter: fmRec, body: bodyStr });
           return json({ ok: true });
@@ -536,19 +697,28 @@ const server = Bun.serve({
 
     // ── Versions / comments / references — folder-layout endpoints (TKT) ──
 
-    const adrVersionsMatch = pathname.match(/^\/api\/adrs\/(ADR-\d+)\/versions$/);
+    const adrVersionsMatch = pathname.match(
+      /^\/api\/adrs\/(ADR-\d+)\/versions$/,
+    );
     if (adrVersionsMatch && req.method === "GET") {
       return json({ versions: await listVersions(adrVersionsMatch[1]) });
     }
 
-    const adrVersionMatch = pathname.match(/^\/api\/adrs\/(ADR-\d+)\/versions\/(\d+)$/);
+    const adrVersionMatch = pathname.match(
+      /^\/api\/adrs\/(ADR-\d+)\/versions\/(\d+)$/,
+    );
     if (adrVersionMatch && req.method === "GET") {
-      const snap = await readVersionSnapshot(adrVersionMatch[1], parseInt(adrVersionMatch[2], 10));
+      const snap = await readVersionSnapshot(
+        adrVersionMatch[1],
+        parseInt(adrVersionMatch[2], 10),
+      );
       if (!snap) return err("not found", 404);
       return json(snap);
     }
 
-    const adrCommentsMatch = pathname.match(/^\/api\/adrs\/(ADR-\d+)\/comments$/);
+    const adrCommentsMatch = pathname.match(
+      /^\/api\/adrs\/(ADR-\d+)\/comments$/,
+    );
     if (adrCommentsMatch) {
       const id = adrCommentsMatch[1];
       try {
@@ -557,8 +727,10 @@ const server = Bun.serve({
         }
         if (req.method === "POST") {
           const payload = (await req.json()) as Record<string, unknown>;
-          const author = typeof payload.author === "string" ? payload.author.trim() : "";
-          const text = typeof payload.text === "string" ? payload.text.trim() : "";
+          const author =
+            typeof payload.author === "string" ? payload.author.trim() : "";
+          const text =
+            typeof payload.text === "string" ? payload.text.trim() : "";
           if (!author) return err("author required");
           if (!text) return err("text required");
           const entry = await appendComment(id, author, text);
@@ -579,8 +751,10 @@ const server = Bun.serve({
         }
         if (req.method === "POST") {
           const payload = (await req.json()) as Record<string, unknown>;
-          const filename = typeof payload.filename === "string" ? payload.filename.trim() : "";
-          const content = typeof payload.content === "string" ? payload.content : "";
+          const filename =
+            typeof payload.filename === "string" ? payload.filename.trim() : "";
+          const content =
+            typeof payload.content === "string" ? payload.content : "";
           if (!filename) return err("filename required");
           await writeReference(id, filename, content);
           return json({ ok: true, filename }, 201);
@@ -591,14 +765,23 @@ const server = Bun.serve({
       }
     }
 
-    const adrRefMatch = pathname.match(/^\/api\/adrs\/(ADR-\d+)\/references\/([^/]+)$/);
+    const adrRefMatch = pathname.match(
+      /^\/api\/adrs\/(ADR-\d+)\/references\/([^/]+)$/,
+    );
     if (adrRefMatch && req.method === "GET") {
-      const content = await readReference(adrRefMatch[1], decodeURIComponent(adrRefMatch[2]));
+      const content = await readReference(
+        adrRefMatch[1],
+        decodeURIComponent(adrRefMatch[2]),
+      );
       if (content === null) return err("not found", 404);
-      return new Response(content, { headers: { "content-type": "text/plain; charset=utf-8" } });
+      return new Response(content, {
+        headers: { "content-type": "text/plain; charset=utf-8" },
+      });
     }
 
-    const adrTransitionMatch = pathname.match(/^\/api\/adrs\/(ADR-\d+)\/transition$/);
+    const adrTransitionMatch = pathname.match(
+      /^\/api\/adrs\/(ADR-\d+)\/transition$/,
+    );
     if (adrTransitionMatch && req.method === "POST") {
       const id = adrTransitionMatch[1];
       try {
@@ -609,18 +792,25 @@ const server = Bun.serve({
           return err(`invalid target state: ${to}`);
         }
         if (!Array.isArray(deciders)) return err("deciders[] required");
-        await transitionAdr(id, to as AdrState, (deciders as unknown[]).map(String));
+        await transitionAdr(
+          id,
+          to as AdrState,
+          (deciders as unknown[]).map(String),
+        );
         // On proposed→accepted, auto-fire promote-draft-tickets (TKT-223). Mints
         // a backlog ticket per proposed_tickets[] entry, resolves DRAFT-N deps,
         // and rewrites the ADR's frontmatter to record materialized_tickets[].
-        let promote: Awaited<ReturnType<typeof promoteDraftTickets>> | undefined;
+        let promote:
+          | Awaited<ReturnType<typeof promoteDraftTickets>>
+          | undefined;
         if (to === "accepted") {
           promote = await promoteDraftTickets(id);
         }
         return json({ ok: true, promote });
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
-        if (msg.startsWith("illegal transition:")) return json({ error: msg }, 409);
+        if (msg.startsWith("illegal transition:"))
+          return json({ error: msg }, 409);
         return err(msg, 500);
       }
     }
@@ -637,7 +827,11 @@ const server = Bun.serve({
       const stacksDir = join(CACHE, "stacks");
       try {
         const files = await readdir(stacksDir);
-        const records: Array<{ file: string; data: Record<string, unknown>; mtime: number }> = [];
+        const records: Array<{
+          file: string;
+          data: Record<string, unknown>;
+          mtime: number;
+        }> = [];
         for (const f of files) {
           if (!f.endsWith(".json") || f === "config.json") continue;
           try {
@@ -645,7 +839,9 @@ const server = Bun.serve({
             const data = JSON.parse(raw) as Record<string, unknown>;
             const s = await stat(join(stacksDir, f));
             records.push({ file: f, data, mtime: s.mtimeMs });
-          } catch { /* skip malformed */ }
+          } catch {
+            /* skip malformed */
+          }
         }
         const statusActive = records.filter(
           (r) => r.data.status === "running" || r.data.status === "planned",
@@ -659,11 +855,15 @@ const server = Bun.serve({
         // should not light the chip-bar. Members in the stack are AND-ed: any
         // member still in-flight keeps the stack visible.
         const ACTIVE_BUCKETS = new Set<Bucket>([
-          "2-stuck", "3-building", "4-testing",
+          "2-stuck",
+          "3-building",
+          "4-testing",
         ]);
         const active: typeof statusActive = [];
         for (const r of statusActive) {
-          const members = Array.isArray(r.data.members) ? r.data.members as string[] : [];
+          const members = Array.isArray(r.data.members)
+            ? (r.data.members as string[])
+            : [];
           if (r.data.agentic_mode !== true || members.length === 0) {
             active.push(r);
             continue;
@@ -671,15 +871,24 @@ const server = Bun.serve({
           let anyActive = false;
           for (const m of members) {
             const found = await findTicket(m);
-            if (found && ACTIVE_BUCKETS.has(found.bucket)) { anyActive = true; break; }
+            if (found && ACTIVE_BUCKETS.has(found.bucket)) {
+              anyActive = true;
+              break;
+            }
           }
           if (anyActive) active.push(r);
         }
         if (active.length === 0) return json({ active: null, active_list: [] });
         // Most-recently-started wins. Fall back to mtime.
         active.sort((a, b) => {
-          const aStart = typeof a.data.started_at === "string" ? Date.parse(a.data.started_at) : a.mtime;
-          const bStart = typeof b.data.started_at === "string" ? Date.parse(b.data.started_at) : b.mtime;
+          const aStart =
+            typeof a.data.started_at === "string"
+              ? Date.parse(a.data.started_at)
+              : a.mtime;
+          const bStart =
+            typeof b.data.started_at === "string"
+              ? Date.parse(b.data.started_at)
+              : b.mtime;
           return bStart - aStart;
         });
         return json({
@@ -691,8 +900,60 @@ const server = Bun.serve({
       }
     }
 
+    // Terminal sessions — ttyd-backed local terminals (lib/terminals.ts). Each
+    // session is a ttyd process on its own localhost port; the browser embeds
+    // it via <iframe>. Persistence across reconnects/restarts comes from tmux.
+    if (pathname === "/api/terminals" && req.method === "GET") {
+      // Enrich each session with its live status + summary + pending notification.
+      // The source of truth is the terminal_live.ts hook (written per session to
+      // cache/terminals/live/<id>.json) — it knows what Claude is doing without
+      // scraping or any API. Terminals with no hook data (a plain shell, or a
+      // claude started before the hook env was set) fall back to a status inferred
+      // from the tmux pane; that fallback has no summary, so the tab shows its cwd.
+      const sessions = await listSessions();
+      const enriched = await Promise.all(
+        sessions.map(async (s) => {
+          const live = await readLive(s.id);
+          if (live?.state) {
+            return {
+              ...s,
+              status: live.state,
+              summary: live.summary ?? null,
+              notification: live.notification ?? null,
+            };
+          }
+          const status = inferState(await capturePane(s.tmux));
+          return { ...s, status, summary: null, notification: null };
+        }),
+      );
+      return json(enriched);
+    }
+    if (pathname === "/api/terminals" && req.method === "POST") {
+      let payload: Record<string, unknown> = {};
+      try {
+        payload = (await req.json()) as Record<string, unknown>;
+      } catch {
+        /* empty body is ok */
+      }
+      const cwd = typeof payload.cwd === "string" ? payload.cwd : undefined;
+      const title =
+        typeof payload.title === "string" ? payload.title : undefined;
+      try {
+        return json(await createSession({ cwd, title }), 201);
+      } catch (e) {
+        return err(e instanceof Error ? e.message : String(e), 400);
+      }
+    }
+    const termIdMatch = pathname.match(/^\/api\/terminals\/(term-[a-z0-9]+)$/);
+    if (termIdMatch && req.method === "DELETE") {
+      return json(await killSession(termIdMatch[1]));
+    }
+
     // Static
-    if (pathname.startsWith("/vendor/") || /\.(js|css|ico|png|svg)$/.test(pathname)) {
+    if (
+      pathname.startsWith("/vendor/") ||
+      /\.(js|css|ico|png|svg)$/.test(pathname)
+    ) {
       return serveStatic(pathname.replace(/^\//, ""));
     }
 

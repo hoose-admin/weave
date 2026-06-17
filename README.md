@@ -1,6 +1,6 @@
 # weave
 
-A local, file-based **ticket board + codebase map + Claude Code skills** you can
+A local, file-based **Claude Code UI + ticket board + codebase map + (a few Claude Code skills)** you can
 drop into any repo. Clone it, run one setup script against your project, and you
 get a localhost dashboard, a graph of your codebase, and a backlog that fills
 itself from a bug-scan of your own code.
@@ -20,6 +20,8 @@ bash setup.sh /path/to/your/repo      # defaults to the current directory
 
 cd /path/to/your/repo/.weave
 bun run start                          # → http://127.0.0.1:5174
+
+To kill:  lsof -ti :5174 | xargs kill
 ```
 
 That's it. Open the URL and you'll see your board, your codebase graph, and (if
@@ -30,7 +32,8 @@ Claude Code is installed) a backlog of real findings from your code.
 - **[Bun](https://bun.sh)** — runs the dashboard and the CLI. *(required)*
 - **[Claude Code](https://claude.com/claude-code)** — powers the `bug-scan` skill
   that fills the backlog from your code. *(optional, but it's the point)*
-- **python3** — for the optional end-of-turn skill-reflection hook. *(optional)*
+- **[ttyd](https://github.com/tsl0922/ttyd)** + **[tmux](https://github.com/tmux/tmux)**
+  — power the **Terminal** tab (`brew install ttyd tmux`). *(optional)*
 
 ---
 
@@ -82,6 +85,33 @@ Drag tickets between buckets in the UI, edit them in the browser, or let the
 | **schemas** | Your databases — detects Firestore / SQL / BigQuery usage and maps each one's tables/collections, columns/fields, and relationships. |
 | **adrs** | Architecture Decision Records and the tickets that implement them. |
 
+## The terminal (`/terminal`)
+
+Open `zsh` terminals in the browser and run `claude` (or anything) in them. Each
+session is a [ttyd](https://github.com/tsl0922/ttyd) process bound to
+`127.0.0.1`, backed by a [tmux](https://github.com/tmux/tmux) session so it
+survives page refreshes and dashboard restarts. The left sidebar lists open
+sessions; the **+** button (top-left) opens one in the default working directory
+set in the bar beside it — which defaults to `~`. Requires `ttyd` + `tmux`
+(`brew install ttyd tmux`) — the tab shows an install hint if they're missing.
+
+Each tab carries a **live status dot** — pulsing amber while something is running
+(e.g. Claude working), red when it's waiting on you (a permission prompt), green
+when a background run just finished and you haven't looked yet, and nothing when
+idle — plus a short **AI summary** of what's happening. weave reads
+each terminal's screen with `tmux capture-pane`; the dot is a purely local
+heuristic, while the summaries call the Anthropic API (Haiku).
+
+> These are fully interactive, writable shells on your machine. ttyd binds to
+> localhost only and there's no extra auth — the same trust model as the rest of
+> the localhost-only dashboard.
+>
+> **Status, summaries, and notifications are 100% local.** When Claude Code runs
+> in a weave terminal, a hook (`terminal_live.ts`) writes its state, a few-word
+> summary of your last prompt, and any pending permission/idle prompt to a local
+> file the dashboard reads — no API key, nothing leaves your machine. Terminals
+> without the hook fall back to a local status dot inferred from the tmux pane.
+
 ## The skills
 
 | Skill | Kind | What it does |
@@ -113,7 +143,7 @@ weave/
 │   └── scripts/ticket-cli.ts# next-id / audit-ids / create (headless ticket filing)
 ├── skills/                  # installed into <target>/.claude/skills
 ├── commands/                # vendored /security-review engine → <target>/.claude/commands
-└── hooks/skill_reflect.py   # installed into <target>/.claude/hooks
+└── hooks/skill_reflect.ts   # installed into <target>/.claude/hooks (runs on Bun)
 ```
 
 ## Configuration

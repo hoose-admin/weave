@@ -6,9 +6,18 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/skill_reflect.py\"",
+            "command": "bun \"$CLAUDE_PROJECT_DIR/.claude/hooks/skill_reflect.ts\"",
             "timeout": 5,
             "statusMessage": "Arming skill-reflection…"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun \"$CLAUDE_PROJECT_DIR/.claude/hooks/terminal_live.ts\"",
+            "timeout": 5
           }
         ]
       }
@@ -18,9 +27,29 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/skill_reflect.py\"",
+            "command": "bun \"$CLAUDE_PROJECT_DIR/.claude/hooks/skill_reflect.ts\"",
             "timeout": 10,
             "statusMessage": "Reflecting on skill/script learnings…"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun \"$CLAUDE_PROJECT_DIR/.claude/hooks/terminal_live.ts\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun \"$CLAUDE_PROJECT_DIR/.claude/hooks/terminal_live.ts\"",
+            "timeout": 5
           }
         ]
       }

@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8" />
+        <title>weave terminal</title>
+        <script>
+            (function () {
+                try {
+                    var saved = localStorage.getItem("weave-theme");
+                    if (saved === "dark" || saved === "light") {
+                        document.documentElement.dataset.theme = saved;
+                        return;
+                    }
+                } catch (e) {}
+                if (
+                    window.matchMedia &&
+                    window.matchMedia("(prefers-color-scheme: dark)").matches
+                ) {
+                    document.documentElement.dataset.theme = "dark";
+                }
+            })();
+        </script>
+        <link rel="stylesheet" href="/styles.css" />
+    </head>
+    <body class="terminal-page">
+        <!-- weave:navbar active="terminal" -->
+        <main class="terminal-page">
+            <aside class="term-sidebar">
+                <div class="term-sidebar-head">
+                    <button
+                        type="button"
+                        id="term-collapse"
+                        class="term-collapse"
+                        title="Collapse sidebar"
+                        aria-label="Collapse sidebar"
+                    >
+                        <span class="term-collapse-icon" aria-hidden="true">‹</span>
+                    </button>
+                </div>
+                <div class="term-bar">
+                    <form id="term-cwd-form" class="term-cwd-form">
+                        <input
+                            type="text"
+                            id="term-cwd"
+                            name="cwd"
+                            autocomplete="off"
+                            spellcheck="false"
+                            placeholder="~ default dir"
+                        />
+                        <button type="submit" class="term-btn">save</button>
+                    </form>
+                    <div class="term-bar-row2">
+                        <button type="button" id="term-new" class="term-btn" title="New terminal">
+                            <span class="term-new-icon" aria-hidden="true">+</span>
+                            <span class="term-new-text">Terminal</span>
+                        </button>
+                        <span id="term-cwd-saved" class="term-cwd-saved" hidden>saved ✓</span>
+                    </div>
+                    <p id="term-bar-error" class="term-error" hidden></p>
+                </div>
+                <ul id="term-list" class="term-list"></ul>
+            </aside>
+            <section class="term-stage" id="term-stage">
+                <div class="term-empty" id="term-empty">
+                    <p>No terminals open.</p>
+                    <p class="term-empty-hint">
+                        Click <strong>+ Terminal</strong> to open a shell, then run
+                        <code>claude</code>.
+                    </p>
+                </div>
+            </section>
+        </main>
+        <!-- weave:howto-modal -->
+
+        <script type="module" src="/terminal.js"></script>
+        <script type="module" src="/navbar-search.js"></script>
+        <script type="module" src="/theme.js"></script>
+        <script type="module" src="/howto.js"></script>
+    </body>
+</html>
