@@ -119,6 +119,12 @@ cat <<EOF
 
   start the board:  cd "$TARGET/.weave" && bun run start
   then open:        http://127.0.0.1:$PORT
+
+  parallel claude sessions (so concurrent terminals can't clobber each other):
+    source "$TARGET/.weave/wt.sh"   # add this line to ~/.zshrc to keep it
+    wt <name>                       # isolated worktree on branch wt/<name>, then claude
+    wt ls / wt rm <name>            # list / remove worktrees
+  (weave's settings.template granted claude git push/branch/commit/worktree perms.)
 EOF
 if [ "$DO_SCAN" != 1 ] || [ "$HAVE_CLAUDE" != 1 ]; then
   cat <<'EOF'

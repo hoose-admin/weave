@@ -11,7 +11,7 @@ is a local dashboard (`cd .weave && bun run start` → http://127.0.0.1:5174).
 
 - **Just find and fix things.** Don't ask permission for additive, reversible, or
   read-only changes. Ask first only for destructive/irreversible actions (delete,
-  drop, overwrite) and for `git commit` / `git push` — **you own git**.
+  drop, overwrite).
 - Run tracked work through tickets. Use the `ticket-manager` skill to create,
   refine, build, test, and validate them; the board reflects the lifecycle.
 - Keep answers and summaries short.

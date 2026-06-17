@@ -24,6 +24,7 @@ const cwdInput = document.getElementById("term-cwd");
 const savedTag = document.getElementById("term-cwd-saved");
 const errEl = document.getElementById("term-bar-error");
 const collapseBtn = document.getElementById("term-collapse");
+const schemeSelect = document.getElementById("term-scheme");
 
 /** @type {Map<string, HTMLIFrameElement>} id -> iframe */
 const frames = new Map();
@@ -481,6 +482,42 @@ if (collapseBtn) {
         setCollapsed(!mainEl.classList.contains("sidebar-collapsed")),
     );
 }
+
+// ── color scheme picker ───────────────────────────────────────────────────────
+// Populate the dropdown from the shared registry (terminal-schemes.js) and
+// persist the choice to localStorage. Writing localStorage fires a `storage`
+// event in every same-origin terminal <iframe> — they recolor live (see
+// terminal-xterm.js). The registry is a window global set by the classic script
+// loaded before this module; guard in case it somehow didn't load.
+function wireSchemePicker() {
+    if (!schemeSelect || !window.WEAVE_TERM_SCHEMES) return;
+    const KEY = window.WEAVE_TERM_SCHEME_KEY;
+
+    schemeSelect.replaceChildren();
+    for (const [id, { label }] of Object.entries(window.WEAVE_TERM_SCHEMES)) {
+        const opt = document.createElement("option");
+        opt.value = id;
+        opt.textContent = label;
+        schemeSelect.appendChild(opt);
+    }
+
+    let saved = null;
+    try {
+        saved = localStorage.getItem(KEY);
+    } catch {
+        /* localStorage unavailable — fall back to the default */
+    }
+    schemeSelect.value = window.weaveTermScheme(saved);
+
+    schemeSelect.addEventListener("change", () => {
+        try {
+            localStorage.setItem(KEY, schemeSelect.value);
+        } catch {
+            /* persistence best-effort; the live iframes won't update without it */
+        }
+    });
+}
+wireSchemePicker();
 
 newBtn.addEventListener("click", () => createSession(cwdInput.value.trim()));
 

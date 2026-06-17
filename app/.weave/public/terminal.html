@@ -56,6 +56,14 @@
                         </button>
                         <span id="term-cwd-saved" class="term-cwd-saved" hidden>saved ✓</span>
                     </div>
+                    <div class="term-bar-row3">
+                        <label class="term-scheme-label" for="term-scheme">theme</label>
+                        <select
+                            id="term-scheme"
+                            class="term-scheme-select"
+                            title="Terminal color scheme"
+                        ></select>
+                    </div>
                     <p id="term-bar-error" class="term-error" hidden></p>
                 </div>
                 <ul id="term-list" class="term-list"></ul>
@@ -72,6 +80,9 @@
         </main>
         <!-- weave:howto-modal -->
 
+        <!-- Scheme registry (classic, runs before the deferred modules) so
+             terminal.js can read the {id,label} list to build the picker. -->
+        <script src="/terminal-schemes.js"></script>
         <script type="module" src="/terminal.js"></script>
         <script type="module" src="/components/navbar-search.js"></script>
         <script type="module" src="/components/theme.js"></script>

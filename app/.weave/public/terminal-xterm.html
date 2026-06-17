@@ -3,37 +3,34 @@
     <head>
         <meta charset="utf-8" />
         <title>weave terminal</title>
-        <!-- Theme bootstrap: mirror the dashboard so the framed terminal isn't
-             a white flash on a dark page. Same-origin as the dashboard, so the
-             `storage` event (terminal-xterm.js) keeps it in sync on toggle. -->
+        <!-- Scheme registry must load before the bootstrap (which reads it) and
+             before terminal-xterm.js (which applies it). Classic script. -->
+        <script src="/terminal-schemes.js"></script>
+        <!-- Background bootstrap: paint the page in the active scheme's surface
+             colour before xterm mounts, so the framed terminal isn't a flash of
+             the wrong colour. The #term padding reveals this background behind
+             the canvas. Same-origin as the dashboard, so the `storage` event
+             (terminal-xterm.js) keeps it in sync when the scheme changes. -->
         <script>
             (function () {
                 try {
-                    var saved = localStorage.getItem("weave-theme");
-                    if (saved === "dark" || saved === "light") {
-                        document.documentElement.dataset.theme = saved;
-                        return;
-                    }
+                    var id = window.weaveTermScheme(
+                        localStorage.getItem(window.WEAVE_TERM_SCHEME_KEY),
+                    );
+                    document.documentElement.style.background =
+                        window.WEAVE_TERM_SCHEMES[id].theme.background;
                 } catch (e) {}
-                if (
-                    window.matchMedia &&
-                    window.matchMedia("(prefers-color-scheme: dark)").matches
-                ) {
-                    document.documentElement.dataset.theme = "dark";
-                }
             })();
         </script>
         <link rel="stylesheet" href="/vendor/xterm.css" />
         <style>
+            /* html carries the scheme background (set by the bootstrap above and
+               kept current by terminal-xterm.js); body stays transparent so the
+               #term padding reveals that single source of truth. */
             html,
             body {
                 margin: 0;
                 height: 100%;
-                background: #ffffff;
-            }
-            html[data-theme="dark"],
-            html[data-theme="dark"] body {
-                background: #0d1117;
             }
             #term {
                 position: absolute;

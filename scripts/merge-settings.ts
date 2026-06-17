@@ -1,6 +1,6 @@
-// Idempotently merge weave's hook entries (settings.template.json) into a
-// target `.claude/settings.json`, creating it if absent and never duplicating
-// an entry that's already there.
+// Idempotently merge weave's hook entries and permission rules
+// (settings.template.json) into a target `.claude/settings.json`, creating it if
+// absent and never duplicating an entry that's already there.
 //
 //   bun merge-settings.ts <template.json> <target-settings.json>
 
@@ -27,7 +27,25 @@ for (const [event, entries] of Object.entries(tpl.hooks ?? {})) {
     if (!seen.has(sig(entry))) tgt.hooks[event].push(entry);
   }
 }
+// permission rules: merge each bucket (allow / deny / ask) as a de-duplicated,
+// order-preserving union, leaving any rules the target already had untouched.
+if (tpl.permissions) {
+  tgt.permissions ??= {};
+  for (const bucket of ["allow", "deny", "ask"]) {
+    const incoming = tpl.permissions[bucket];
+    if (!Array.isArray(incoming)) continue;
+    tgt.permissions[bucket] ??= [];
+    const have = new Set(tgt.permissions[bucket]);
+    for (const rule of incoming) {
+      if (!have.has(rule)) {
+        tgt.permissions[bucket].push(rule);
+        have.add(rule);
+      }
+    }
+  }
+}
+
 if (tpl.$schema && !tgt.$schema) tgt.$schema = tpl.$schema;
 
 writeFileSync(tgtPath, JSON.stringify(tgt, null, 2) + "\n");
-console.log(`merged weave hooks into ${tgtPath}`);
+console.log(`merged weave hooks + permissions into ${tgtPath}`);

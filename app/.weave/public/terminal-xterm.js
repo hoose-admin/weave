@@ -31,26 +31,24 @@ const host = location.hostname || "127.0.0.1";
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 
-// ── theme ─────────────────────────────────────────────────────────────────
-// Palette tracks the dashboard's dark/light. The 16 ANSI colors keep xterm's
-// defaults (legible on both); we only override the surface + cursor + selection.
-function xtermTheme() {
-    const dark = document.documentElement.dataset.theme === "dark";
-    return dark
-        ? {
-              background: "#0d1117",
-              foreground: "#c9d1d9",
-              cursor: "#c9d1d9",
-              cursorAccent: "#0d1117",
-              selectionBackground: "rgba(56,139,253,0.4)",
-          }
-        : {
-              background: "#ffffff",
-              foreground: "#1f2328",
-              cursor: "#1f2328",
-              cursorAccent: "#ffffff",
-              selectionBackground: "rgba(84,174,255,0.4)",
-          };
+// ── color scheme ──────────────────────────────────────────────────────────
+// The palette is one of the named schemes in terminal-schemes.js (GitHub Dark,
+// Catppuccin, Dracula, Nord, Solarized), chosen in the dashboard toolbar and
+// stored in localStorage under WEAVE_TERM_SCHEME_KEY. Each scheme is a complete,
+// fixed look — surface AND all 16 ANSI colors — and does NOT follow the
+// dashboard's light/dark toggle (so, unlike before, we don't read `weave-theme`
+// here). The parent writes the choice and the same-origin `storage` event below
+// recolors us live, no reload.
+const SCHEME_KEY = window.WEAVE_TERM_SCHEME_KEY;
+
+function activeSchemeTheme() {
+    let id = null;
+    try {
+        id = localStorage.getItem(SCHEME_KEY);
+    } catch {
+        /* localStorage unavailable — weaveTermScheme falls back to default */
+    }
+    return window.WEAVE_TERM_SCHEMES[window.weaveTermScheme(id)].theme;
 }
 
 const term = new Terminal({
@@ -62,14 +60,26 @@ const term = new Terminal({
     // a configured native terminal — a bonus alongside the explicit remaps below.
     macOptionIsMeta: true,
     scrollback: 10000,
-    theme: xtermTheme(),
+    theme: activeSchemeTheme(),
 });
+
+// Apply the active scheme to the live terminal AND to the page background. The
+// #term padding (terminal-xterm.html) reveals the page behind the canvas, so
+// matching documentElement's background to the scheme avoids a mismatched
+// border. The HTML's inline bootstrap sets this for first paint; this keeps it
+// in sync after a live scheme change.
+function applyScheme() {
+    const theme = activeSchemeTheme();
+    term.options.theme = theme;
+    document.documentElement.style.background = theme.background;
+}
 
 const fit = new FitAddon.FitAddon();
 term.loadAddon(fit);
 
 const mount = document.getElementById("term");
 term.open(mount);
+applyScheme();
 safeFit();
 
 // ── ttyd socket ─────────────────────────────────────────────────────────────
@@ -224,14 +234,11 @@ if (!port) {
     new ResizeObserver(() => safeFit()).observe(mount);
     window.addEventListener("resize", safeFit);
 
-    // Live theme sync: the dashboard's theme toggle writes localStorage from the
-    // parent document; the `storage` event fires here (same origin) so we recolor
-    // without a reload.
+    // Live scheme sync: the dashboard's scheme picker writes localStorage from
+    // the parent document; the `storage` event fires here (same origin, sibling
+    // browsing context) so we recolor without a reload.
     window.addEventListener("storage", (e) => {
-        if (e.key !== "weave-theme") return;
-        const v = e.newValue === "dark" || e.newValue === "light" ? e.newValue : "";
-        if (v) document.documentElement.dataset.theme = v;
-        term.options.theme = xtermTheme();
+        if (e.key === SCHEME_KEY) applyScheme();
     });
 
     connect();

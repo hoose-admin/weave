@@ -41,9 +41,10 @@ Claude Code is installed) a backlog of real findings from your code.
 
 1. **Vendors the app** — copies the Bun dashboard into `your-repo/.weave/`.
 2. **Installs the skills + hook + commands** into `your-repo/.claude/`, merging
-   weave's hook into any existing `.claude/settings.json` (idempotent,
-   non-destructive). Commands include the vendored, stack-agnostic
-   `/security-review` engine (MIT) that the `security` skill wraps.
+   weave's hooks **and a git permission allowlist** into any existing
+   `.claude/settings.json` (idempotent, non-destructive — your own rules are kept).
+   Commands include the vendored, stack-agnostic `/security-review` engine (MIT)
+   that the `security` skill wraps.
 3. **Scaffolds the board** — `your-repo/.tickets/` with the 9 lifecycle buckets
    and an `ADRs/` folder.
 4. **Writes `weave.config.json`** and a starter `CLAUDE.md` (only if you don't
@@ -112,6 +113,41 @@ heuristic, while the summaries call the Anthropic API (Haiku).
 > file the dashboard reads — no API key, nothing leaves your machine. Terminals
 > without the hook fall back to a local status dot inferred from the tmux pane.
 
+## Parallel sessions (worktrees)
+
+Multiple `claude` terminals editing the same folder can silently **clobber each
+other** — Claude Code has no cross-session file lock, and its read-before-edit
+check only guards within a single session. A
+[git worktree](https://git-scm.com/docs/git-worktree) gives each session its own
+checkout + branch, so concurrent edits never collide; you merge the branches back
+through git like any other branch.
+
+Setup vendors a `wt` helper to `<repo>/.weave/wt.sh`. Source it once from your
+shell rc (`~/.zshrc` / `~/.bashrc`):
+
+```bash
+source /path/to/your-repo/.weave/wt.sh
+```
+
+Then, from anywhere inside the repo:
+
+```bash
+wt feature-x     # create/reuse a worktree on branch wt/feature-x, then open claude in it
+wt ls            # list this repo's worktrees
+wt rm feature-x  # remove the worktree (its branch is kept)
+```
+
+Worktrees live in a sibling dir (`<repo>-worktrees/<name>`) so they stay out of
+weave's graph/dashboard scans, and gitignored `node_modules` are symlinked in so
+the vendored dashboard runs immediately in the new tree.
+
+To let those sessions push, setup also merges a git permission allowlist
+(`push` / `branch` / `commit` / `worktree`, plus a best-effort `--force`/`-f`
+push guard) into `<repo>/.claude/settings.json`. The force-push deny is a speed
+bump, not a wall — Claude Code matches permission patterns by command prefix, so
+reordered flags (`git push origin main --force`) slip past it. Edit or delete any
+of these rules in that file if you'd rather Claude not run git unprompted.
+
 ## The skills
 
 | Skill | Kind | What it does |
@@ -132,12 +168,13 @@ heuristic, while the summaries call the Anthropic API (Haiku).
 ```
 weave/
 ├── setup.sh                 # the installer
-├── settings.template.json   # hook wiring merged into the target's .claude/settings.json
+├── settings.template.json   # hooks + git permission allowlist, merged into the target's .claude/settings.json
 ├── CLAUDE.template.md        # starter project instructions copied into the target
-├── scripts/merge-settings.ts
+├── scripts/merge-settings.ts # merges template hooks + permissions (idempotent)
 ├── app/.weave/              # the Bun dashboard, vendored into <target>/.weave
 │   ├── server.ts            # Bun.serve + REST API + static serving
 │   ├── weave.config.ts      # path/port resolver (env + weave.config.json overrides)
+│   ├── wt.sh                # `wt` worktree helper for parallel claude sessions
 │   ├── lib/                 # tickets, ADRs, frontmatter, graph builders
 │   ├── public/              # vanilla-JS UI (board, ticket editor, Cytoscape graphs)
 │   └── scripts/ticket-cli.ts# next-id / audit-ids / create (headless ticket filing)
@@ -161,8 +198,10 @@ at your repo root or set env vars:
 
 ## Notes
 
-- **File-based, localhost-only.** The server binds `127.0.0.1`, has no auth layer,
-  and **never runs git** — you own commits.
+- **File-based, localhost-only.** The dashboard server binds `127.0.0.1`, has no
+  auth layer, and never runs git itself. Claude Code *sessions*, however, get a
+  git allowlist (push / branch / commit / worktree) merged into `.claude/settings.json`
+  for the worktree flow — see [Parallel sessions](#parallel-sessions-worktrees).
 - `.weave/cache/` holds generated graph JSON; it's safe to delete (rebuilt on
   demand) and is gitignored.
 - The board's data — `.tickets/` — is plain markdown. Commit it to version your

@@ -75,7 +75,7 @@ This skill supports four operations. Pick the one(s) implied by the user request
 | `plan-stack` | "plan a stack", "group the backlog", "what should I work on next" (agentic mode) — reads `0-backlog/`, scores ticket affinity, partitions into sub-stacks of ≤5 tickets sized to a single context window. Writes `.weave/cache/stacks/<id>.json`. No file moves. |
 | `run-stack` | "run stack <id>", "go" (after `plan-stack`) — walks `members[]` end-to-end: refine → pass-2 → build → test → validate → commit prompt. Only stops at `.tickets/STOP`, a `2-stuck/` route, a destructive-op confirm, or the per-ticket commit/push prompt at validating. Foreground only in v1. |
 | `stack-status` | "stack status", "where are we" — reads the active stack record and per-ticket bucket state, reports queued / refined / staged / built / tested / validating / complete / stuck / failed. Pure read. |
-| `agentic-commit` | Auto-fires after `validate-ticket` passes when `agentic_mode: true`. Prompts the user once with a draft commit message; on a single `y` confirm, creates one atomic commit per ticket AND pushes. Supersedes CLAUDE.md's git prohibition **only** in agentic mode. |
+| `agentic-commit` | Auto-fires after `validate-ticket` passes when `agentic_mode: true`. Prompts the user once with a draft commit message; on a single `y` confirm, creates one atomic commit per ticket AND pushes.  |
 | `mark-stuck` | "TKT-NNN is stuck", "park TKT-NNN — need approval", "stuck on TKT-NNN" — used by the agentic flow when it cannot proceed without additional information or human approval; moves the ticket to `2-stuck/` and appends a `### Stuck Reason` block to the body explaining what's needed |
 | `unstick-ticket` | "unstick TKT-NNN", "TKT-NNN is unblocked", "resume TKT-NNN" — user confirms the question is answered or approval is given; moves the ticket back to `3-building` (or `1-staging` if it was never built) and the agentic flow may resume |
 | `move-ticket` | "move TKT-NNN to <stage>", "promote to ready", "mark as building", "ship to validating", "complete TKT-NNN" |
@@ -241,7 +241,7 @@ Note in the Context section (or in `files_touched` once known) the repo-relative
 ### Procedure
 
 1. Find the ticket file by ID across all stage folders. If the user gave only a title or fuzzy reference, list candidates and confirm.
-2. Move the file with plain `mv` — **always**, never `git mv`. Per repo CLAUDE.md this skill never touches git staging; the user handles `git add` / commit themselves.
+2. Move the file with plain `mv` — **always**, never `git mv`. 
 3. Update the `status` field in the ticket's frontmatter to match the destination (`"Todo"` for backlog/staging, `"Stuck"` for stuck, `"In Progress"` for building, `"Testing"` for testing, `"Validating"` for validating, `"Complete"` for complete, `"Archived"` for archive).
 4. If moving to `6-complete`, add a `completed: YYYY-MM-DD` field to the frontmatter (today's date). The `.weave/` server's `archiveStaleComplete()` reads this on every `/api/buckets` poll to decide when to migrate the ticket to `7-archive/`.
 

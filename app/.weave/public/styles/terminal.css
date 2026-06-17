@@ -91,6 +91,42 @@ main.terminal-page.sidebar-collapsed {
     white-space: nowrap;
 }
 
+/* Color-scheme picker: [ theme ][ select ▾ ]. The terminal is a browser
+   xterm.js surface, so its palette is one of weave's named schemes (see
+   terminal-schemes.js) rather than the user's native terminal. The select
+   matches the cwd input's look. */
+.term-bar-row3 {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+}
+.term-scheme-label {
+    flex: 0 0 auto;
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--muted);
+}
+.term-scheme-select {
+    flex: 1 1 auto;
+    min-width: 0;
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    padding: 5px 8px;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    background: var(--bg);
+    color: var(--ink);
+    cursor: pointer;
+}
+.term-scheme-select:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--focus);
+}
+
 /* Left panel: control bar (top) + session list (scrolls). The bar — and thus
    the working-dir input — is exactly the width of this panel; the iframe stage
    takes the rest of the row at full height. */
@@ -152,6 +188,7 @@ main.terminal-page.sidebar-collapsed .term-bar {
 }
 main.terminal-page.sidebar-collapsed .term-cwd-form,
 main.terminal-page.sidebar-collapsed .term-cwd-saved,
+main.terminal-page.sidebar-collapsed .term-bar-row3,
 main.terminal-page.sidebar-collapsed .term-error,
 main.terminal-page.sidebar-collapsed .term-new-text {
     display: none;
