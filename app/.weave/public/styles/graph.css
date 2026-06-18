@@ -56,9 +56,13 @@
 
 /* ── Graph legend ─────────────────────────────────────────────────────── */
 .legend {
-    position: absolute;
+    /* Anchored to the bottom-right of the viewport so it never collides with the
+       toolbar/reset-layout button up top — chrome height varies per graph route
+       (graph-title, multi-line toolbar), so a fixed `top` was unreliable. Opens
+       upward; long legends (ai) scroll within max-height. */
+    position: fixed;
     right: 18px;
-    top: 158px;
+    bottom: 18px;
     background: var(--paper);
     border: 1px solid var(--rule);
     border-radius: var(--radius-md);
@@ -66,8 +70,10 @@
     font-size: var(--font-size-sm);
     line-height: 1.5;
     color: var(--ink);
-    box-shadow: 0 1px 0 rgba(var(--shadow-rgb), 0.04);
+    box-shadow: 0 2px 8px rgba(var(--shadow-rgb), 0.12);
     max-width: 240px;
+    max-height: calc(100vh - 200px);
+    overflow-y: auto;
     z-index: 5;
 }
 .legend h4 {
@@ -481,7 +487,11 @@
 .sc-name {
     font: 600 13px/1.2 var(--font-display);
     color: var(--ink);
-    word-break: break-all;
+    flex: 1 1 auto;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 .sc-badge {
     font: 500 10px/1 var(--font-display);
@@ -497,12 +507,7 @@
     font: 400 11px/1 var(--font-display);
     color: var(--muted);
     white-space: nowrap;
-}
-.sc-tmeta {
-    font: 400 10px/1.3 var(--font-display);
-    color: var(--muted);
-    opacity: 0.85;
-    margin-left: 2px;
+    flex: none;
 }
 .sc-chev {
     margin-left: auto;
@@ -516,30 +521,46 @@
 .sc-body {
     border-top: 1px solid var(--rule);
 }
-.sc-fields {
+/* Table meta strip (partition / cluster / materialized view / subcollection). */
+.sc-meta {
     display: flex;
-    flex-direction: column;
-}
-.sc-field {
-    display: grid;
-    grid-template-columns: minmax(110px, 1.4fr) auto auto minmax(0, 2fr);
-    align-items: baseline;
-    gap: 8px;
-    padding: 5px 12px;
-    font: 400 12px/1.3 var(--font-display);
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 8px 12px;
     border-bottom: 1px solid var(--rule);
+    background: color-mix(in srgb, var(--c, var(--muted)) 5%, transparent);
 }
-.sc-field:last-child {
+.sc-meta span {
+    font: 400 10px/1.4 var(--font-display);
+    color: var(--muted);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 1px 6px;
+    white-space: nowrap;
+}
+/* Columns as a real table → native, consistent column alignment across rows. */
+.sc-cols {
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: auto;
+    font: 400 12px/1.35 var(--font-display);
+}
+.sc-cols td {
+    padding: 4px 12px;
+    border-bottom: 1px solid var(--rule);
+    vertical-align: baseline;
+}
+.sc-cols tr:last-child td {
     border-bottom: none;
 }
-.sc-field:hover {
+.sc-cols tr:hover td {
     background: var(--row-hover);
 }
 .f-name {
     color: var(--ink);
-    word-break: break-all;
+    white-space: nowrap;
 }
-.sc-field.is-key .f-name {
+.f-row.is-key .f-name {
     color: var(--peach);
     font-weight: 600;
 }
@@ -561,9 +582,12 @@
 .f-mode.rep {
     color: var(--teal);
 }
+/* Description column absorbs the remaining width and truncates to one line. */
 .f-desc {
     color: var(--muted);
     font-size: 11px;
+    max-width: 1px;
+    width: 100%;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

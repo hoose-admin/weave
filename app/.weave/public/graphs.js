@@ -862,29 +862,35 @@ function renderSchemaCards(data) {
     const relChips = related.get(t.id);
     const searchStr = [t.label, ...fields.map((f) => f.label)].join(" ").toLowerCase();
 
+    const hasDesc = fields.some((f) => f.description);
+    const rows = fields.map((f) => {
+      const mode = f.mode === "REQUIRED" ? "required" : f.mode === "REPEATED" ? "repeated" : "";
+      const modeCls = f.mode === "REQUIRED" ? " req" : f.mode === "REPEATED" ? " rep" : "";
+      return `<tr class="f-row${f.isKey ? " is-key" : ""}">`
+        + `<td class="f-name">${f.isKey ? "◆ " : ""}${escHtml(f.label)}</td>`
+        + `<td class="f-type">${escHtml(f.fieldType ?? "")}</td>`
+        + `<td class="f-mode${modeCls}">${mode}</td>`
+        + (hasDesc ? `<td class="f-desc" title="${escHtml(f.description ?? "")}">${escHtml(f.description ?? "")}</td>` : "")
+        + `</tr>`;
+    }).join("");
     const body = fields.length
-      ? `<div class="sc-fields">${fields.map((f) => `
-          <div class="sc-field${f.isKey ? " is-key" : ""}">
-            <span class="f-name">${f.isKey ? "◆ " : ""}${escHtml(f.label)}</span>
-            <span class="f-type">${escHtml(f.fieldType ?? "")}</span>
-            <span class="f-mode${f.mode === "REQUIRED" ? " req" : f.mode === "REPEATED" ? " rep" : ""}">${
-              f.mode === "REQUIRED" ? "required" : f.mode === "REPEATED" ? "repeated" : ""
-            }</span>
-            ${f.description ? `<span class="f-desc" title="${escHtml(f.description)}">${escHtml(f.description)}</span>` : "<span class='f-desc'></span>"}
-          </div>`).join("")}</div>`
+      ? `<table class="sc-cols"><tbody>${rows}</tbody></table>`
       : `<div class="sc-empty">No static schema — this table is built at runtime (CTAS / load job). Append <code>?live=1</code> to the URL for live introspection.</div>`;
+    const metaStrip = meta.length
+      ? `<div class="sc-meta">${meta.map((x) => `<span>${escHtml(x)}</span>`).join("")}</div>`
+      : "";
 
     return `
       <section class="sc-card" data-db="${escHtml(t.db || "")}" data-search="${escHtml(searchStr)}" style="--c:${m.color}">
         <header class="sc-head" tabindex="0" role="button" aria-expanded="false">
           <span class="sc-dot"></span>
-          <span class="sc-name">${escHtml(t.label)}</span>
+          <span class="sc-name" title="${escHtml(t.label)}">${escHtml(t.label)}</span>
           <span class="sc-badge" style="--c:${m.color}">${escHtml(m.label)}</span>
-          <span class="sc-count">${fields.length ? `${fields.length} col${fields.length === 1 ? "" : "s"}` : "schema via ?live=1"}</span>
-          ${meta.length ? `<span class="sc-tmeta">${meta.map((x) => escHtml(x)).join(" · ")}</span>` : ""}
+          <span class="sc-count">${fields.length ? `${fields.length} col${fields.length === 1 ? "" : "s"}` : "?live=1"}</span>
           <span class="sc-chev">▸</span>
         </header>
         <div class="sc-body" hidden>
+          ${metaStrip}
           ${body}
           ${relChips && relChips.size ? `<div class="sc-rel">↔ joins: ${[...relChips].map((r) => `<code>${escHtml(r)}</code>`).join(" ")}</div>` : ""}
         </div>
