@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # weave setup — vendor the local ticket dashboard + Claude Code skills into a
-# target repo, scaffold the board, build the codebase graphs, and (optionally)
-# run the first-pass bug-scan that fills the backlog.
+# target repo, scaffold the board, build the codebase graphs, and (after asking)
+# run a deep bug-scan that seeds the backlog with real findings from your code.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -9,6 +9,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PORT=5174
 PORT_SET=0
 DO_SCAN=1
+ASSUME_YES=0
 DO_START=0
 DO_GITPERMS=0
 TARGET=""
@@ -22,7 +23,9 @@ usage: bash setup.sh [TARGET_REPO] [options]
   TARGET_REPO   path to the repo to weave-enable (default: current directory)
 
 options:
-  --no-scan     skip the first-run repo-map + bug-scan skill passes (Claude Code)
+  --scan        run the deep bug-scan without prompting (non-interactive use)
+  --no-scan     skip the bug-scan entirely, no prompt
+                (default: ASK whether to run the deep bug-scan)
   --start       start the dashboard when setup finishes
   --port N      dashboard port (default: 5174)
   --git-perms   merge weave's git allowlist (commit/push/branch/worktree) into
@@ -35,6 +38,7 @@ EOF
 while [ $# -gt 0 ]; do
   case "$1" in
     --no-scan)   DO_SCAN=0 ;;
+    --scan)      ASSUME_YES=1 ;;
     --start)     DO_START=1 ;;
     --git-perms) DO_GITPERMS=1 ;;
     --port)    PORT="${2:?--port needs a value}"; PORT_SET=1; shift ;;
@@ -107,18 +111,49 @@ echo "→ building dashboard graphs"
 ( cd "$TARGET/.weave" && bun run build:graphs ) \
   || echo "⚠ graph build hit an error — the dashboard will build graphs on demand instead"
 
-# ── 6. first-run skill pass: bug-scan (fills the backlog from your own code) ──
+# ── 6. first-run bug-scan (seeds the backlog with REAL findings from your code) ──
+#    The deep, multi-agent scan. OPTIONAL but recommended; it can take several
+#    minutes and a meaningful number of Claude tokens — so we ASK first (unless
+#    --scan / --no-scan force it) rather than silently running or skipping it.
 #    (dataflow + schemas graphs are deterministic — already built in step 5.)
-run_skill() {  # $1 = prompt, $2 = label
-  echo "→ running $2 …"
-  if ( cd "$TARGET" && claude -p "$1" --permission-mode acceptEdits ); then
-    echo "  ✓ $2 done"
+run_bug_scan() {
+  echo "  → seeding the backlog: /bug-scan (deep multi-agent scan)…"
+  if ( cd "$TARGET" && claude -p "/bug-scan" --permission-mode acceptEdits ); then
+    echo "  ✓ bug-scan done — open the board to see the findings"
   else
-    echo "  ⚠ $2 via 'claude -p' didn't complete — run it interactively (see below)"
+    echo "  ⚠ headless /bug-scan didn't fully complete — run it interactively: open Claude Code in the repo and run /bug-scan"
   fi
 }
-if [ "$DO_SCAN" = 1 ] && [ "$HAVE_CLAUDE" = 1 ]; then
-  run_skill "Use the bug-scan skill to scan this codebase for likely bugs, verify them, and file backlog tickets." "bug-scan"
+if [ "$HAVE_CLAUDE" = 1 ] && [ "$DO_SCAN" = 1 ]; then
+  cat <<'EOF'
+
+──────────────────────────────────────────────────────────────────────
+  Optional: seed your board with a DEEP BUG-SCAN
+  weave can fan a multi-agent scan across your code, adversarially verify
+  each finding, and file the real bugs as backlog tickets — so the board
+  starts with genuine findings, not demo data.
+    • Optional, but recommended for a useful first board.
+    • Multi-agent: can take several minutes and uses Claude tokens.
+    • Always available later in Claude Code:   /bug-scan
+──────────────────────────────────────────────────────────────────────
+EOF
+  if [ "$ASSUME_YES" = 1 ]; then
+    echo "  (--scan given — running without prompting)"
+    run_bug_scan
+  elif [ -t 0 ]; then
+    printf "  Run the deep bug-scan now? [y/N] "
+    _ans=""; read -r _ans || true
+    case "$_ans" in
+      [yY]|[yY][eE][sS]) run_bug_scan ;;
+      *) echo "  ↳ skipped — run it anytime in Claude Code:  /bug-scan" ;;
+    esac
+  else
+    echo "  (non-interactive shell — not prompting. Re-run with --scan, or use /bug-scan in Claude Code.)"
+  fi
+elif [ "$DO_SCAN" = 0 ]; then
+  echo "→ bug-scan skipped (--no-scan). Run it anytime in Claude Code:  /bug-scan"
+else
+  echo "→ Claude Code not found — skipping bug-scan. Install Claude Code, then run /bug-scan in the repo to seed the backlog."
 fi
 
 # ── done ─────────────────────────────────────────────────────────────────────
@@ -139,13 +174,7 @@ if [ "$DO_GITPERMS" = 1 ]; then
 else
   echo "  (git perms NOT granted — re-run with --git-perms to let wt sessions push unprompted.)"
 fi
-if [ "$DO_SCAN" != 1 ] || [ "$HAVE_CLAUDE" != 1 ]; then
-  cat <<'EOF'
-
-  enrich it from Claude Code (run inside your repo):
-    /bug-scan     scan for bugs and fill the backlog
-EOF
-fi
+# (bug-scan prompt + messaging handled in step 6 above)
 
 if [ "$DO_START" = 1 ]; then
   echo "→ starting dashboard…"

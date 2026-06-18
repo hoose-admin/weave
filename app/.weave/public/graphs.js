@@ -853,10 +853,14 @@ function renderSchemaCards(data) {
       // keys first, then declaration order (stable)
       return (b.isKey ? 1 : 0) - (a.isKey ? 1 : 0);
     });
+    const optLines = fmtOptimizations(t.optimizations);
     const meta = [
-      t.matview ? "materialized view" : "",
-      t.partitionField ? `partition: ${t.partitionField}` : "",
-      t.clusterFields?.length ? `cluster: ${t.clusterFields.join(", ")}` : "",
+      classChip(t),
+      ...(optLines.length ? optLines : [
+        t.matview ? "materialized view" : "",
+        t.partitionField ? `partition: ${t.partitionField}` : "",
+        t.clusterFields?.length ? `cluster: ${t.clusterFields.join(", ")}` : "",
+      ]),
       t.subOf ? `subcollection of ${String(t.subOf).replace(/^[a-z]+:/, "")}` : "",
     ].filter(Boolean);
     const relChips = related.get(t.id);
@@ -1218,6 +1222,40 @@ function getInspector() {
 function hideInspector() {
   if (inspectorEl) inspectorEl.hidden = true;
 }
+// Compact, class-agnostic summary of a table's TableOptimizations (see DB_CLASSES.md).
+function fmtOptimizations(o) {
+  if (!o) return [];
+  const out = [];
+  if (o.primaryKey && o.primaryKey.length) out.push(`PK(${o.primaryKey.join(", ")})`);
+  if (o.partition) {
+    const p = o.partition;
+    const k = p.strategy === "TIME" ? `${p.key}${p.unit ? "/" + p.unit : ""}` : `${p.strategy}(${p.key})`;
+    out.push(`partition: ${k}${p.requireFilter ? " ·filter-required" : ""}`);
+  }
+  if (o.clustering && o.clustering.length) out.push(`cluster: ${o.clustering.join(", ")}`);
+  if (o.materialized) out.push("materialized view");
+  if (o.distribution) out.push(`dist: ${o.distribution}`);
+  if (o.indexes) for (const ix of o.indexes) {
+    out.push(`idx${ix.unique ? "*" : ""} ${ix.method ? ix.method + " " : ""}(${(ix.columns || []).join(", ")})`
+      + `${ix.covering && ix.covering.length ? ` +incl(${ix.covering.join(", ")})` : ""}${ix.where ? " WHERE…" : ""}`);
+  }
+  if (o.compositeIndexes) for (const ci of o.compositeIndexes) out.push(`composite (${(ci.fields || []).join(", ")})`);
+  if (o.ttl) out.push(`TTL${o.ttl.field ? ": " + o.ttl.field : ""}`);
+  if (o.rowKey) out.push(`rowkey: ${o.rowKey}`);
+  if (o.vectorIndex) out.push(`vector: ${o.vectorIndex.method}`);
+  if (o.notes) for (const n of o.notes) out.push(n);
+  return out;
+}
+const DB_CLASS_LABEL = {
+  relational: "RELATIONAL", document: "DOCUMENT", analytical: "ANALYTICAL",
+  newsql: "NEWSQL", "wide-column": "WIDE-COLUMN", vector: "VECTOR",
+};
+// "ANALYTICAL · BigQuery" — the database-class badge for a table card.
+function classChip(d) {
+  const cls = d.dbClass ? (DB_CLASS_LABEL[d.dbClass] || d.dbClass) : "";
+  return [cls, d.engine].filter(Boolean).join(" · ");
+}
+
 function inspectorHead(kindLabel, name, state) {
   return `<div class="bqi-head"><div><span class="bqi-kind">${escHtml(kindLabel)}</span> <code>${escHtml(name)}</code>${state ? ` <span class="weave-tt-muted">${escHtml(state)}</span>` : ""}</div><button class="bqi-close" title="close">×</button></div>`;
 }
@@ -1227,12 +1265,15 @@ function showInspector(node) {
   let html = "";
   if (d.kind === "table") {
     const cols = schemaState.colNodes.filter((n) => n.data.parent === d.id);
+    const optLines = fmtOptimizations(d.optimizations);
     const meta = [
-      d.db ? `db: ${escHtml(d.db)}` : "",
+      escHtml(classChip(d)) || (d.db ? `db: ${escHtml(d.db)}` : ""),
       d.subOf ? `subcollection of ${escHtml(String(d.subOf).replace(/^[a-z]+:/, ""))}` : "",
-      d.matview ? "materialized view" : "",
-      d.partitionField ? `partition: ${escHtml(d.partitionField)}` : "",
-      d.clusterFields ? `cluster: ${escHtml(d.clusterFields.join(", "))}` : "",
+      ...(optLines.length ? optLines.map(escHtml) : [
+        d.matview ? "materialized view" : "",
+        d.partitionField ? `partition: ${escHtml(d.partitionField)}` : "",
+        d.clusterFields ? `cluster: ${escHtml(d.clusterFields.join(", "))}` : "",
+      ]),
     ].filter(Boolean).join(" · ");
     const rows = cols.length
       ? cols.map((c) => {

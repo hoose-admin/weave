@@ -66,15 +66,19 @@ Claude Code is installed) a backlog of real findings from your code.
    already have one).
 5. **Builds the dashboard graphs** — deterministic, no Claude needed. The
    `dataflow` and `schemas` graphs are detected straight from your code here.
-6. **Runs `bug-scan`** (if Claude Code is present) — files verified bugs into the
-   backlog. The board is populated by *your* code from minute one.
+6. **Offers the deep `bug-scan`** (if Claude Code is present) — setup *prompts*
+   `Run the deep bug-scan now? [y/N]`; on yes it fans out a multi-agent scan,
+   adversarially verifies each finding, and files the real bugs into the backlog
+   so the board is populated by *your* code from minute one. Decline and run
+   `/bug-scan` whenever; force it non-interactively with `--scan`.
 
-Flags: `--no-scan` (skip step 6), `--start` (launch the board at the end),
-`--port N`, `--git-perms` (opt into weave's git allowlist — see below).
+Flags: `--scan` (run the bug-scan without prompting), `--no-scan` (skip it
+entirely, no prompt), `--start` (launch the board at the end), `--port N`,
+`--git-perms` (opt into weave's git allowlist — see below).
 
-> The headless bug-scan pass (`claude -p …`) is best-effort. If it doesn't fully
-> complete under your permission settings, just run it interactively in Claude
-> Code: `/bug-scan`. Everything else in setup is deterministic.
+> When you opt in, the headless bug-scan pass (`claude -p …`) is best-effort. If
+> it doesn't fully complete under your permission settings, just run it
+> interactively in Claude Code: `/bug-scan`. Everything else in setup is deterministic.
 
 ---
 

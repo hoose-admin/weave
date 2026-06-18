@@ -28,11 +28,53 @@ import { REPO_ROOT } from "../../weave.config.ts";
 
 // ── Public types (Cytoscape shape) ────────────────────────────────────────────
 
-export type Db = "firestore" | "sql" | "bigquery";
+// A database grouping key (node-id prefix + colour). The first-class providers use
+// "firestore" | "sql" | "bigquery"; generic-detector engines use their own key
+// (e.g. "mongodb", "redshift", "pgvector"). Kept open (string) so the set extends.
+export type Db = string;
 type NodeKind = "table" | "column";
 // "fk-reference" (not "references") deliberately avoids colliding with the AI
 // graph's edge[kind="references"] style — all graph styles share one array.
 type EdgeKind = "fk-reference" | "joins" | "subcollection";
+
+// ── Database-class taxonomy (the 6 canonical categories) ──────────────────────
+// Every detected engine maps to ONE class; each class implies a family of data-
+// organization / query-optimization mechanisms. Single source of truth shared by
+// the providers + the dashboard legend. Full contract: ./DB_CLASSES.md.
+export type DbClass =
+  | "relational"  // 1. SQL — Postgres / MySQL / SQL Server / SQLite
+  | "document"    // 2. Document / Key-Value — Firestore / Mongo / DynamoDB / Redis
+  | "analytical"  // 3. OLAP / Columnar — BigQuery / Redshift / Snowflake
+  | "newsql"      // 4. Distributed Global Relational — Spanner / Cockroach / Yugabyte
+  | "wide-column" // 5. Wide-Column / Time-Series — Cassandra / Bigtable / HBase
+  | "vector";     // 6. Vector / ANN — Pinecone / Milvus / pgvector
+
+// engine (lowercased product name) → class. Open table: add a row and that
+// engine classifies automatically.
+export const DB_CLASS_OF: Record<string, DbClass> = {
+  postgres: "relational", postgresql: "relational", mysql: "relational",
+  mariadb: "relational", sqlite: "relational", sqlserver: "relational",
+  mssql: "relational", oracle: "relational",
+  firestore: "document", mongodb: "document", dynamodb: "document",
+  redis: "document", documentdb: "document", cosmos: "document", couchbase: "document",
+  bigquery: "analytical", redshift: "analytical", snowflake: "analytical",
+  synapse: "analytical", databricks: "analytical", clickhouse: "analytical",
+  spanner: "newsql", cockroachdb: "newsql", yugabyte: "newsql",
+  cassandra: "wide-column", scylla: "wide-column", bigtable: "wide-column",
+  hbase: "wide-column", timestream: "wide-column", keyspaces: "wide-column",
+  pinecone: "vector", milvus: "vector", qdrant: "vector",
+  weaviate: "vector", pgvector: "vector",
+};
+
+// One-line "optimization family" per class — for the dashboard legend/tooltip.
+export const DB_CLASS_OPTIMIZATIONS: Record<DbClass, string> = {
+  relational: "B-tree/Hash/GIN/GiST indexes · covering (INCLUDE) · RANGE/LIST/HASH partitioning · FKs",
+  document: "composite & single-field indexes · GSI/LSI · composite keys · TTL eviction",
+  analytical: "columnar storage · partitioning · clustering / sort keys · MPP distribution · materialized views",
+  newsql: "interleaved (co-located) tables · non-sequential PKs · range-split directories",
+  "wide-column": "row-key engineering · column families · size-tiered / leveled compaction",
+  vector: "HNSW · IVF-PQ · scalar quantization (approximate nearest-neighbor)",
+};
 
 export interface SchemaNode {
   data: {
@@ -41,6 +83,9 @@ export interface SchemaNode {
     kind: NodeKind;
     db: Db;
     // table-only
+    engine?: string; // concrete product, e.g. "PostgreSQL" / "BigQuery" / "Firestore"
+    dbClass?: DbClass; // taxonomy class implied by the engine
+    optimizations?: TableOptimizations;
     matview?: boolean;
     partitionField?: string;
     clusterFields?: string[];
@@ -74,7 +119,7 @@ export interface SchemasGraph {
     source: "static" | "live";
     counts: Record<string, number>;
     warnings: Warning[];
-    databases: { db: Db; tables: number }[];
+    databases: { db: Db; engine: string; dbClass: DbClass; tables: number }[];
   };
 }
 
@@ -94,10 +139,46 @@ export interface FieldDef {
   isKey?: boolean;
 }
 
+export interface IndexDef {
+  name?: string;
+  columns: string[];
+  method?: string; // btree | hash | gin | gist | brin | spgist
+  unique?: boolean;
+  covering?: string[]; // INCLUDE columns (covering index)
+  where?: string; // partial-index predicate
+}
+
+export interface PartitionDef {
+  strategy: "RANGE" | "LIST" | "HASH" | "TIME";
+  key: string;
+  unit?: string; // DAY / HOUR / MONTH / YEAR for time partitioning
+  requireFilter?: boolean; // BQ require_partition_filter
+}
+
+// Per-class, open optimization record. A provider fills only the slots its class
+// uses (see DB_CLASSES.md); the card renderer summarizes whatever is present.
+export interface TableOptimizations {
+  primaryKey?: string[];
+  indexes?: IndexDef[]; // relational / analytical search indexes
+  partition?: PartitionDef; // relational / analytical
+  clustering?: string[]; // analytical cluster / sort keys
+  materialized?: boolean; // analytical matview
+  distribution?: string; // MPP distribution style (KEY / EVEN / ALL)
+  compositeIndexes?: { fields: string[]; scope?: string }[]; // document (Firestore / Mongo)
+  ttl?: { field?: string; note?: string }; // document TTL eviction
+  rowKey?: string; // wide-column row-key design
+  columnFamilies?: string[]; // wide-column
+  vectorIndex?: { method: string; metric?: string; dims?: number }; // vector
+  notes?: string[]; // detected-but-unmodeled extras
+}
+
 export interface TableDef {
   db: Db;
   name: string;
   fields: FieldDef[];
+  engine?: string; // concrete product (set by the provider)
+  dbClass?: DbClass; // taxonomy class
+  optimizations?: TableOptimizations;
   matview?: boolean;
   partitionField?: string;
   clusterFields?: string[];
@@ -126,6 +207,8 @@ export interface ProviderResult {
 
 export interface SchemaProvider {
   db: Db;
+  engine: string; // concrete product name (may be refined during detect/introspect)
+  dbClass: DbClass; // taxonomy class
   detect(): Promise<boolean>;
   introspect(opts: { live?: boolean }): Promise<ProviderResult>;
 }
@@ -209,6 +292,8 @@ interface FsCollection {
 
 export class FirestoreProvider implements SchemaProvider {
   db: Db = "firestore";
+  engine = "Firestore";
+  dbClass: DbClass = "document";
 
   async detect(): Promise<boolean> {
     const deps = depNames(await readPackageJson());
@@ -943,6 +1028,8 @@ function typeNameCandidates(coll: string): string[] {
 
 export class SqlProvider implements SchemaProvider {
   db: Db = "sql";
+  engine = "SQL";
+  dbClass: DbClass = "relational";
 
   async detect(): Promise<boolean> {
     const deps = depNames(await readPackageJson());
@@ -953,7 +1040,7 @@ export class SqlProvider implements SchemaProvider {
       if (rel.endsWith("schema.prisma")) return true;
       if (rel.endsWith(".sql")) {
         const src = await safeRead(rel);
-        if (src && /CREATE\s+TABLE/i.test(src)) return true;
+        if (src && /CREATE\s+TABLE/i.test(src) && !looksLikeBigQuerySql(src)) return true;
       }
       if (isTsLike(rel)) {
         const src = await safeRead(rel);
@@ -978,16 +1065,37 @@ export class SqlProvider implements SchemaProvider {
     const relations: RelationDef[] = [];
     const seen = new Set<string>();
 
+    const sqlSrcs: string[] = [];
+    let sawPgIsms = false;
     for (const rel of await this.sqlSourceFiles()) {
       const src = await safeRead(rel);
       if (!src) continue;
       if (rel.endsWith(".prisma")) {
         parsePrisma(src, tables, relations, seen);
+      } else if (rel.endsWith(".sql") && looksLikeBigQuerySql(src)) {
+        continue; // BigQuery-dialect DDL — owned by the BigQueryProvider, not relational
       } else if (rel.endsWith(".sql") && /CREATE\s+TABLE/i.test(src)) {
         parseCreateTable(src, rel, tables, relations, seen, warnings);
+        sqlSrcs.push(src);
+      } else if (rel.endsWith(".sql")) {
+        sqlSrcs.push(src); // index / alter / partition-only migrations
       } else if (isTsLike(rel) && /\b(pg|mysql|sqlite)Table\s*\(/.test(src)) {
         parseDrizzle(src, tables, seen);
       }
+      if (/\b(SERIAL|BIGSERIAL)\b|USING\s+(gin|gist|brin)|RETURNING\b|::\w/i.test(src)) sawPgIsms = true;
+    }
+    // Second pass: attach declared relational optimizations (indexes / partitioning / PK).
+    const byName = new Map<string, TableDef>();
+    for (const t of tables) byName.set(t.name.toLowerCase(), t);
+    for (const src of sqlSrcs) parseSqlOptimizations(src, byName);
+    // Refine the engine label for the legend.
+    if (sawPgIsms) this.engine = "PostgreSQL";
+    else {
+      const deps = depNames(await readPackageJson());
+      this.engine = deps.has("mysql2") ? "MySQL"
+        : deps.has("pg") ? "PostgreSQL"
+        : deps.has("better-sqlite3") || deps.has("sqlite3") ? "SQLite"
+        : "SQL";
     }
     return { tables, relations, warnings };
   }
@@ -1137,6 +1245,83 @@ function parseCreateTable(
   void rel;
 }
 
+// Second-pass relational optimization parser for raw SQL: CREATE INDEX,
+// ALTER ... ADD PRIMARY KEY, declarative partitioning, inline PK. parseCreateTable
+// handles structure; this attaches the relational-class mechanisms to the matching
+// TableDef (bare name). Anything targeting a non-SQL table no-ops.
+function parseSqlOptimizations(src: string, byName: Map<string, TableDef>): void {
+  const optOf = (raw: string): TableOptimizations | null => {
+    const t = byName.get(raw.split(".").pop()!.replace(/["`']/g, "").toLowerCase());
+    if (!t) return null;
+    return (t.optimizations ??= {});
+  };
+  const cols = (inner: string): string[] =>
+    splitTopLevel(inner, ",")
+      .map((c) => c.trim().replace(/["`']/g, "").split(/\s+/)[0])
+      .filter(Boolean);
+
+  // CREATE [UNIQUE] INDEX [CONCURRENTLY] [IF NOT EXISTS] [name] ON [ONLY] table [USING m] ( ... ) [INCLUDE (...)] [WHERE ...]
+  const idxRe =
+    /CREATE\s+(UNIQUE\s+)?INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+NOT\s+EXISTS\s+)?(?:["`']?(\w+)["`']?\s+)?ON\s+(?:ONLY\s+)?["`']?([\w.]+)["`']?\s*(?:USING\s+(\w+)\s*)?\(/gi;
+  let m: RegExpExecArray | null;
+  while ((m = idxRe.exec(src))) {
+    const o = optOf(m[3]);
+    const open = src.indexOf("(", idxRe.lastIndex - 1);
+    const close = matchParen(src, open);
+    if (close < 0) continue;
+    idxRe.lastIndex = close;
+    if (!o) continue;
+    const columns = cols(src.slice(open + 1, close));
+    const semi = src.indexOf(";", close);
+    const tail = src.slice(close + 1, semi < 0 ? src.length : semi);
+    const inc = /INCLUDE\s*\(([^)]*)\)/i.exec(tail)?.[1];
+    const where = /\bWHERE\s+([^;]+)/i.exec(tail)?.[1]?.trim();
+    (o.indexes ??= []).push({
+      name: m[2],
+      columns,
+      method: m[4]?.toLowerCase(),
+      unique: m[1] ? true : undefined,
+      covering: inc ? cols(inc) : undefined,
+      where: where || undefined,
+    });
+  }
+
+  // ALTER TABLE [ONLY] t ADD [CONSTRAINT c] PRIMARY KEY ( ... )
+  const pkRe =
+    /ALTER\s+TABLE\s+(?:ONLY\s+)?["`']?([\w.]+)["`']?\s+ADD\s+(?:CONSTRAINT\s+["`']?\w+["`']?\s+)?PRIMARY\s+KEY\s*\(([^)]*)\)/gi;
+  while ((m = pkRe.exec(src))) {
+    const o = optOf(m[1]);
+    if (o) o.primaryKey = cols(m[2]);
+  }
+
+  // CREATE TABLE … [ ( … ) ] PARTITION BY {RANGE|LIST|HASH} (key)  /  PARTITION OF parent
+  const ctRe = /CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?["`']?([\w.]+)["`']?\s*(\(|PARTITION\s+OF\b)/gi;
+  while ((m = ctRe.exec(src))) {
+    const o = optOf(m[1]);
+    if (!o) continue;
+    if (/PARTITION\s+OF/i.test(m[2])) {
+      const parent = /PARTITION\s+OF\s+["`']?([\w.]+)/i.exec(src.slice(m.index))?.[1];
+      if (parent) (o.notes ??= []).push(`partition of ${parent.split(".").pop()}`);
+      continue;
+    }
+    const open = src.indexOf("(", m.index);
+    const close = matchParen(src, open);
+    if (close < 0) continue;
+    const body = src.slice(open + 1, close);
+    const pkInline = /\bPRIMARY\s+KEY\s*\(([^)]*)\)/i.exec(body);
+    if (pkInline && !o.primaryKey) o.primaryKey = cols(pkInline[1]);
+    const semi = src.indexOf(";", close);
+    const tail = src.slice(close + 1, semi < 0 ? src.length : semi);
+    const pb = /PARTITION\s+BY\s+(RANGE|LIST|HASH)\s*\(([^)]*)\)/i.exec(tail);
+    if (pb) {
+      o.partition = {
+        strategy: pb[1].toUpperCase() as PartitionDef["strategy"],
+        key: cols(pb[2])[0] ?? pb[2].trim(),
+      };
+    }
+  }
+}
+
 function sqlType(t: string): string {
   const u = t.toUpperCase();
   if (/CHAR|TEXT|UUID|CLOB/.test(u)) return "string";
@@ -1146,6 +1331,15 @@ function sqlType(t: string): string {
   if (/JSON/.test(u)) return "map";
   if (/ARRAY/.test(u)) return "array";
   return "unknown";
+}
+
+// A `.sql` file written in BigQuery dialect (backtick `${project}.${dataset}.table`
+// FQNs, FLOAT64 / STRUCT<> types, OPTIONS(description=…), `bq query`, bare
+// `PARTITION BY col` + `CLUSTER BY`). These belong to the BigQueryProvider; the
+// relational SQL provider ignores them so a BQ migration never registers a phantom
+// relational table or engine. This is the raw-`.sql` engine-attribution guard.
+function looksLikeBigQuerySql(src: string): boolean {
+  return /`\s*\$\{|`[\w-]+\.[\w-]+\.[\w-]+`|OPTIONS\s*\(\s*description|\bFLOAT64\b|\bSTRUCT\s*<|\bbq\s+query\b|\bCLUSTER\s+BY\b/i.test(src);
 }
 
 function parseDrizzle(src: string, tables: TableDef[], seen: Set<string>): void {
@@ -1335,6 +1529,8 @@ function collectBqJoins(src: string, known: Set<string>): RelationDef[] {
 
 export class BigQueryProvider implements SchemaProvider {
   db: Db = "bigquery";
+  engine = "BigQuery";
+  dbClass: DbClass = "analytical";
 
   async detect(): Promise<boolean> {
     const deps = depNames(await readPackageJson());
@@ -1446,12 +1642,23 @@ function parseBqSetupTables(src: string, tables: TableDef[], seen: Set<string>, 
       : undefined;
 
     if (!seen.has(`bigquery:${name}`)) {
+      const opt: TableOptimizations = {};
+      if (partitionField) {
+        opt.partition = {
+          strategy: /range_partitioning/.test(body) ? "RANGE" : "TIME",
+          key: partitionField,
+          unit: /TimePartitioningType\.(HOUR|DAY|MONTH|YEAR)/.exec(body)?.[1],
+          requireFilter: /require_partition_filter\s*=\s*True/i.test(body) || undefined,
+        };
+      }
+      if (clusterFields.length) opt.clustering = clusterFields;
       tables.push({
         db: "bigquery",
         name,
         fields,
         clusterFields: clusterFields.length ? clusterFields : undefined,
         partitionField,
+        optimizations: Object.keys(opt).length ? opt : undefined,
       });
       seen.add(`bigquery:${name}`);
     }
@@ -1608,17 +1815,210 @@ async function safeRead(rel: string): Promise<string | null> {
 
 // ── Compose graph ─────────────────────────────────────────────────────────────
 
+// ── Generic engine detectors (classify-all, shallow) ─────────────────────────
+// The three providers above do deep structure capture. These lightweight
+// detectors identify EVERY OTHER engine in the taxonomy — emitting at least a
+// classified database node, plus best-effort table names where they're cheaply
+// declared in-repo. See DB_CLASSES.md. (Depth is the first-class providers' job.)
+
+interface EngineSignature {
+  key: string; // db grouping key (node-id prefix)
+  engine: string; // display name
+  dbClass: DbClass;
+  deps?: string[]; // package.json deps that imply this engine
+  src?: RegExp; // a source / config code signal
+  tables?: (corpus: { rel: string; src: string }[]) => TableDef[]; // best-effort names
+}
+
+// One memoised corpus per build (reset at buildSchemasGraph start) so the many
+// generic detectors share a single walk instead of each re-reading the tree.
+let _corpus: { rel: string; src: string }[] | null = null;
+async function sourceCorpus(): Promise<{ rel: string; src: string }[]> {
+  if (_corpus) return _corpus;
+  const files = await walk(
+    REPO_ROOT,
+    (rel) => isTsLike(rel) || /\.(py|go|rb|java|kt|cs|sql|cql|json|ya?ml|toml|tf)$/i.test(rel),
+  );
+  const out: { rel: string; src: string }[] = [];
+  for (const rel of files) {
+    const src = await safeRead(rel);
+    if (src) out.push({ rel, src });
+  }
+  _corpus = out;
+  return out;
+}
+
+const mongooseTables = (corpus: { rel: string; src: string }[]): TableDef[] => {
+  const names = new Set<string>();
+  for (const { src } of corpus)
+    for (const m of src.matchAll(/(?:mongoose|models?)\.model\s*\(\s*["'`]([A-Za-z_]\w*)["'`]/g)) names.add(m[1]);
+  return [...names].map((name) => ({ db: "mongodb", name, fields: [] }));
+};
+const dynamoTables = (corpus: { rel: string; src: string }[]): TableDef[] => {
+  const names = new Set<string>();
+  for (const { src } of corpus)
+    for (const m of src.matchAll(/TableName\s*[:=]\s*["'`]([\w.-]+)["'`]/g)) names.add(m[1]);
+  return [...names].map((name) => ({ db: "dynamodb", name, fields: [] }));
+};
+const cqlTables = (corpus: { rel: string; src: string }[]): TableDef[] => {
+  const out: TableDef[] = [];
+  const seen = new Set<string>();
+  for (const { rel, src } of corpus) {
+    if (!rel.endsWith(".cql") && !/PRIMARY\s+KEY\s*\(\s*\(/.test(src)) continue;
+    for (const m of src.matchAll(/CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?["`']?([\w.]+)["`']?\s*\(/gi)) {
+      const name = m[1].split(".").pop()!;
+      if (seen.has(name)) continue;
+      seen.add(name);
+      const pk = /PRIMARY\s+KEY\s*\(\s*\(([^)]*)\)/i.exec(src.slice(m.index))?.[1];
+      out.push({ db: "cassandra", name, fields: [], optimizations: pk ? { rowKey: pk.trim() } : undefined });
+    }
+  }
+  return out;
+};
+
+// Signals favor package deps + high-specificity source patterns (connection URIs,
+// SDK class names, engine-specific DDL with syntax). NO bare case-insensitive words:
+// a token like `sortKey` must never imply "Redshift". A mention is not usage.
+const ENGINE_SIGNATURES: EngineSignature[] = [
+  // document (beyond Firestore)
+  { key: "mongodb", engine: "MongoDB", dbClass: "document", deps: ["mongodb", "mongoose"], src: /\bmongoose\b|\bMongoClient\b|mongodb(?:\+srv)?:\/\//, tables: mongooseTables },
+  { key: "dynamodb", engine: "DynamoDB", dbClass: "document", deps: ["@aws-sdk/client-dynamodb", "dynamoose"], src: /\bDynamoDB(?:Client|DocumentClient)\b|\bCreateTableCommand\b/, tables: dynamoTables },
+  { key: "redis", engine: "Redis", dbClass: "document", deps: ["redis", "ioredis"], src: /\bnew\s+Redis\s*\(|rediss?:\/\// },
+  { key: "cosmos", engine: "Cosmos DB", dbClass: "document", deps: ["@azure/cosmos"], src: /\bCosmosClient\b/ },
+  { key: "couchbase", engine: "Couchbase", dbClass: "document", deps: ["couchbase"], src: /couchbases?:\/\// },
+  // analytical (beyond BigQuery)
+  { key: "redshift", engine: "Redshift", dbClass: "analytical", deps: ["@aws-sdk/client-redshift", "@aws-sdk/client-redshift-data"], src: /\bDISTSTYLE\b|\bDISTKEY\s*\(|\bSORTKEY\s*\(|redshift\.amazonaws\.com/ },
+  { key: "snowflake", engine: "Snowflake", dbClass: "analytical", deps: ["snowflake-sdk"], src: /\bsnowflake-sdk\b|\.snowflakecomputing\.com/ },
+  { key: "synapse", engine: "Synapse", dbClass: "analytical", src: /\.sql\.azuresynapse\.net|\bSynapse\s+Analytics\b/i },
+  { key: "databricks", engine: "Databricks", dbClass: "analytical", deps: ["@databricks/sql"], src: /databricks:\/\/|\.databricks\.com|\bdbfs:\// },
+  { key: "clickhouse", engine: "ClickHouse", dbClass: "analytical", deps: ["@clickhouse/client", "clickhouse"], src: /clickhouse:\/\/|ENGINE\s*=\s*\w*MergeTree/i },
+  // newsql (distributed global relational)
+  { key: "spanner", engine: "Cloud Spanner", dbClass: "newsql", deps: ["@google-cloud/spanner"], src: /INTERLEAVE\s+IN\s+PARENT|spanner\.googleapis\.com/i },
+  { key: "cockroachdb", engine: "CockroachDB", dbClass: "newsql", src: /cockroachlabs\.cloud|cockroachdb:\/\// },
+  { key: "yugabyte", engine: "YugabyteDB", dbClass: "newsql", src: /\byugabytedb\b|yugabyte:\/\// },
+  // wide-column / time-series
+  { key: "cassandra", engine: "Cassandra", dbClass: "wide-column", deps: ["cassandra-driver"], src: /PRIMARY\s+KEY\s*\(\s*\(|cassandra:\/\//, tables: cqlTables },
+  { key: "scylla", engine: "ScyllaDB", dbClass: "wide-column", src: /\bscylladb\b/i },
+  { key: "bigtable", engine: "Cloud Bigtable", dbClass: "wide-column", deps: ["@google-cloud/bigtable"], src: /bigtable\.googleapis\.com|\bnew\s+Bigtable\b/ },
+  { key: "hbase", engine: "HBase", dbClass: "wide-column", src: /org\.apache\.hadoop\.hbase/ },
+  { key: "timestream", engine: "Timestream", dbClass: "wide-column", deps: ["@aws-sdk/client-timestream-write"], src: /\bTimestreamWrite\b|timestream\.[\w-]+\.amazonaws/ },
+  // vector
+  { key: "pgvector", engine: "pgvector", dbClass: "vector", src: /CREATE\s+EXTENSION\s+(?:IF\s+NOT\s+EXISTS\s+)?["']?vector\b|USING\s+(?:hnsw|ivfflat)\b|\bvector\s*\(\s*\d{2,}\s*\)/i },
+  { key: "pinecone", engine: "Pinecone", dbClass: "vector", deps: ["@pinecone-database/pinecone"], src: /\bPinecone\b|pinecone\.io/ },
+  { key: "milvus", engine: "Milvus", dbClass: "vector", deps: ["@zilliz/milvus2-sdk-node"], src: /\bmilvus\b/i },
+  { key: "qdrant", engine: "Qdrant", dbClass: "vector", deps: ["@qdrant/js-client-rest"], src: /\bqdrant\b/i },
+  { key: "weaviate", engine: "Weaviate", dbClass: "vector", deps: ["weaviate-ts-client", "weaviate-client"], src: /\bweaviate\b/i },
+];
+
+// One instance per signature: each carries its own db/engine/dbClass so the build
+// loop registers + stamps it correctly. Identification-only when no schema parses.
+export class GenericEngineProvider implements SchemaProvider {
+  db: Db;
+  engine: string;
+  dbClass: DbClass;
+  private sig: EngineSignature;
+  constructor(sig: EngineSignature) {
+    this.sig = sig;
+    this.db = sig.key;
+    this.engine = sig.engine;
+    this.dbClass = sig.dbClass;
+  }
+  async detect(): Promise<boolean> {
+    if (this.sig.deps?.length) {
+      const deps = depNames(await readPackageJson());
+      if (this.sig.deps.some((d) => deps.has(d))) return true;
+    }
+    if (this.sig.src) {
+      for (const { src } of await sourceCorpus()) if (this.sig.src.test(src)) return true;
+    }
+    return false;
+  }
+  async introspect(): Promise<ProviderResult> {
+    const corpus = await sourceCorpus();
+    let tables = this.sig.tables ? this.sig.tables(corpus) : [];
+    if (!tables.length) {
+      // No statically-declared schema — emit one classified identification node so
+      // the database TYPE is still documented on /graphs/schemas.
+      tables = [
+        {
+          db: this.sig.key,
+          name: this.sig.engine,
+          fields: [],
+          optimizations: {
+            notes: [`${this.sig.engine} detected; schema is runtime / console-managed (not statically declared in-repo)`],
+          },
+        },
+      ];
+    }
+    return { tables, relations: [], warnings: [] };
+  }
+}
+
 const PROVIDERS: SchemaProvider[] = [
   new FirestoreProvider(),
   new SqlProvider(),
   new BigQueryProvider(),
+  ...ENGINE_SIGNATURES.map((s) => new GenericEngineProvider(s)),
 ];
 
+// Firestore composite indexes + TTL come from firestore.indexes.json (the Firebase
+// CLI deploy artifact), not app code — read it directly and attach to the matching
+// collection. Absent file → a soft note (those indexes are then console-managed and
+// invisible to a static scan). This populates the document-class optimization slots.
+async function attachFirestoreIndexes(tables: TableDef[], warnings: Warning[]): Promise<void> {
+  const fsTables = tables.filter((t) => t.db === "firestore");
+  if (!fsTables.length) return;
+  let raw: string | null = null;
+  for (const cand of [
+    "firestore.indexes.json",
+    "firestore/firestore.indexes.json",
+    "config/firestore.indexes.json",
+    "backend/firestore.indexes.json",
+  ]) {
+    raw = await safeRead(cand);
+    if (raw) break;
+  }
+  if (!raw) {
+    warnings.push({
+      kind: "firestore-indexes-undeclared",
+      detail: "no firestore.indexes.json in repo — Firestore composite indexes / TTL are console-managed and not shown",
+    });
+    return;
+  }
+  let cfg: { indexes?: any[]; fieldOverrides?: any[] };
+  try {
+    cfg = JSON.parse(raw);
+  } catch {
+    warnings.push({ kind: "firestore-indexes-unparsed", detail: "firestore.indexes.json is not valid JSON" });
+    return;
+  }
+  const byName = new Map<string, TableDef>();
+  for (const t of fsTables) byName.set(t.name, t);
+  for (const idx of cfg.indexes ?? []) {
+    const t = byName.get(idx.collectionGroup);
+    if (!t) continue;
+    const opt = (t.optimizations ??= {});
+    (opt.compositeIndexes ??= []).push({
+      fields: (idx.fields ?? []).map(
+        (f: any) => `${f.fieldPath}${f.order === "DESCENDING" ? " ↓" : f.arrayConfig ? " []" : ""}`,
+      ),
+      scope: idx.queryScope,
+    });
+  }
+  for (const ov of cfg.fieldOverrides ?? []) {
+    if (ov.ttl) {
+      const t = byName.get(ov.collectionGroup);
+      if (t) (t.optimizations ??= {}).ttl = { field: ov.fieldPath, note: "TTL eviction" };
+    }
+  }
+}
+
 export async function buildSchemasGraph(opts: { live?: boolean } = {}): Promise<SchemasGraph> {
+  _corpus = null; // fresh corpus each build (the server rebuilds graphs on demand)
   const warnings: Warning[] = [];
   const allTables: TableDef[] = [];
   const allRelations: RelationDef[] = [];
-  const databases: { db: Db; tables: number }[] = [];
+  const databases: { db: Db; engine: string; dbClass: DbClass; tables: number }[] = [];
   let liveRan = false;
 
   // Run detection for every provider, then introspect only the detected ones.
@@ -1640,10 +2040,14 @@ export async function buildSchemasGraph(opts: { live?: boolean } = {}): Promise<
     }
     // Live actually ran only if no live-unavailable warning was emitted.
     if (opts.live && !result.warnings.some((w) => w.kind === "live-unavailable")) liveRan = true;
+    for (const t of result.tables) {
+      t.engine ??= p.engine;
+      t.dbClass ??= p.dbClass;
+    }
     allTables.push(...result.tables);
     allRelations.push(...result.relations);
     for (const w of result.warnings) warnings.push(w);
-    databases.push({ db: p.db, tables: result.tables.length });
+    databases.push({ db: p.db, engine: p.engine, dbClass: p.dbClass, tables: result.tables.length });
   }
 
   if (databases.length === 0) {
@@ -1660,6 +2064,9 @@ export async function buildSchemasGraph(opts: { live?: boolean } = {}): Promise<
       },
     };
   }
+
+  // Firestore composite indexes / TTL (from firestore.indexes.json, if present).
+  await attachFirestoreIndexes(allTables, warnings);
 
   const nodes: SchemaNode[] = [];
   const edges: SchemaEdge[] = [];
@@ -1687,6 +2094,10 @@ export async function buildSchemasGraph(opts: { live?: boolean } = {}): Promise<
         label: t.name,
         kind: "table",
         db: t.db,
+        engine: t.engine,
+        dbClass: t.dbClass,
+        optimizations:
+          t.optimizations && Object.keys(t.optimizations).length ? t.optimizations : undefined,
         matview: t.matview || undefined,
         partitionField: t.partitionField,
         clusterFields: t.clusterFields && t.clusterFields.length ? t.clusterFields : undefined,

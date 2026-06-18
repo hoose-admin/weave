@@ -347,10 +347,9 @@ async function readCachedOrBuild(
   return graph;
 }
 
-const server = Bun.serve({
-  port: PORT,
+const serveOptions = {
   hostname: "127.0.0.1",
-  async fetch(req) {
+  async fetch(req: Request) {
     const url = new URL(req.url);
     const { pathname } = url;
 
@@ -959,6 +958,45 @@ const server = Bun.serve({
 
     return new Response("not found", { status: 404 });
   },
-});
+};
 
+// Bind the dashboard, stepping forward from PORT until we find a free one.
+// Bun.serve throws (EADDRINUSE) when the port is taken — commonly a weave
+// server from another repo, or an orphaned `--hot` process from a previous
+// run. Rather than die and make whoever launched us go probe the port, walk to
+// the next port and announce the URL we actually landed on.
+function isPortInUse(e: unknown): boolean {
+  const code = (e as { code?: string } | null)?.code;
+  const msg = e instanceof Error ? e.message : String(e);
+  return (
+    code === "EADDRINUSE" ||
+    /EADDRINUSE|address already in use|is in use/i.test(msg)
+  );
+}
+
+const PORT_TRIES = 20;
+let server: ReturnType<typeof Bun.serve> | undefined;
+for (let port = PORT; port < PORT + PORT_TRIES; port++) {
+  try {
+    server = Bun.serve({ ...serveOptions, port });
+    break;
+  } catch (e) {
+    if (isPortInUse(e) && port < PORT + PORT_TRIES - 1) {
+      console.warn(`weave: port ${port} in use → trying ${port + 1}`);
+      continue;
+    }
+    throw e;
+  }
+}
+if (!server) {
+  throw new Error(
+    `weave: no free port in ${PORT}–${PORT + PORT_TRIES - 1}`,
+  );
+}
+
+if (server.port !== PORT) {
+  console.warn(
+    `weave: requested port ${PORT} was busy — bound ${server.port} instead`,
+  );
+}
 console.log(`weave dashboard → http://${server.hostname}:${server.port}`);
