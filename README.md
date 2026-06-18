@@ -3,7 +3,7 @@
 A local first, no subscription way to develop code using your browser on localhost. Designed for Claude code users.
 Claude Pro subscription required, Max subscription suggested for initial setup. An API key can be used, but thats a much much more expensive way to run this.
 
-<video src="./Weave-intro.mp4" width="100%" controls autoplay> 
+<video src="./Weave-intro.mp4" width="75%" controls autoplay> 
 </video>
 
 This repo has the following features:
