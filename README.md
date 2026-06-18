@@ -18,7 +18,6 @@ No database. No build pipeline. No external services. Markdown files on disk are
 the source of truth, served by a tiny [Bun](https://bun.sh) process on
 `127.0.0.1`.
 
-There's a '?' symbol in the navbar, click it if you need suggestions.
 
 ---
 
