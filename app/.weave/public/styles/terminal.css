@@ -99,7 +99,8 @@ main.terminal-page.sidebar-collapsed {
     display: flex;
     align-items: center;
     gap: 8px;
-    width: 100%;
+    flex: 1 1 auto;
+    min-width: 0;
 }
 .term-scheme-label {
     flex: 0 0 auto;
@@ -138,12 +139,14 @@ main.terminal-page.sidebar-collapsed {
     background: var(--paper);
 }
 
-/* Drawer header — holds the collapse chevron. Stays visible in both states,
-   so when the panel is a thin rail the chevron is still there to reopen it. */
+/* Drawer header — the theme picker fills the row and the collapse chevron is
+   pinned to its right. Stays visible in both states, so when the panel is a
+   thin rail the chevron is still there to reopen it (the picker hides). */
 .term-sidebar-head {
     flex: 0 0 auto;
     display: flex;
-    justify-content: flex-end;
+    align-items: center;
+    gap: 8px;
     padding: 6px;
     border-bottom: 1px solid var(--rule);
 }

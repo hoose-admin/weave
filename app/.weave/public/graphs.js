@@ -700,6 +700,16 @@ async function load(rebuild = false) {
   const url = `/api/graphs/${kind}${rebuild ? "?rebuild=1" : ""}`;
   const data = await fetch(url).then((r) => r.json());
   if (cy) cy.destroy();
+  // Schemas is a CARD view (not a graph): one expandable card per table showing
+  // its columns, DB-agnostic. Render cards and skip the cytoscape path entirely.
+  if (kind === "schemas") {
+    cy = null;
+    renderSchemaCards(data);
+    const line = infoLine(kind, data);
+    $("#info").innerHTML = line;
+    $("#info").dataset.fullLine = line;
+    return;
+  }
   // schemas ships every column as a compound child in the initial payload; use
   // a compound-safe layout for the first paint (setupSchema collapses + re-lays
   // out immediately) so dagre never sees compound nodes.
@@ -757,6 +767,175 @@ async function load(rebuild = false) {
   if (positionsEnabled(kind)) {
     applySavedPositions(kind);
     cy.on("free", "node", () => saveCurrentPositions(kind));
+  }
+}
+
+// ── Schemas CARD view ───────────────────────────────────────────────────────
+// DB-agnostic: every table (BigQuery, Firestore, SQL/Cloud-SQL/RDS/Aurora/
+// Redshift/Spanner, DynamoDB, Cosmos, Mongo, …) renders as one expandable card
+// showing its columns. The provider layer tags each table with a `db`; this map
+// turns any engine into a label + accent colour (unknown engines fall back to a
+// neutral badge, so the view never breaks on a new database type).
+const DB_META = {
+  bigquery:  { label: "BigQuery",   color: "#fe640b" },
+  firestore: { label: "Firestore",  color: "#40a02b" },
+  sql:       { label: "SQL",        color: "#df8e1d" },
+  postgres:  { label: "Postgres",   color: "#336791" },
+  mysql:     { label: "MySQL",      color: "#00758f" },
+  sqlite:    { label: "SQLite",     color: "#0f80cc" },
+  spanner:   { label: "Spanner",    color: "#4285f4" },
+  redshift:  { label: "Redshift",   color: "#c1474b" },
+  snowflake: { label: "Snowflake",  color: "#29b5e8" },
+  dynamodb:  { label: "DynamoDB",   color: "#4053d6" },
+  cosmos:    { label: "Cosmos DB",  color: "#0078d4" },
+  mongodb:   { label: "MongoDB",    color: "#13aa52" },
+  cassandra: { label: "Cassandra",  color: "#1287b1" },
+  redis:     { label: "Redis",      color: "#d82c20" },
+  s3:        { label: "S3",         color: "#e25444" },
+};
+function dbMeta(db) {
+  return DB_META[db] || { label: db || "database", color: "var(--muted)" };
+}
+function tableIdOf(elId) {
+  // column ids are "<db>:<table>.<col>"; table ids are "<db>:<table>".
+  const dot = elId.indexOf(".");
+  return dot < 0 ? elId : elId.slice(0, dot);
+}
+
+function renderSchemaCards(data) {
+  const host = $("#schema-cards");
+  if (!host) return;
+  const nodes = data.nodes ?? [];
+  const tables = nodes.filter((n) => n.data.kind === "table").map((n) => n.data);
+  const cols = nodes.filter((n) => n.data.kind === "column").map((n) => n.data);
+  const colsByTable = new Map();
+  for (const c of cols) {
+    if (!colsByTable.has(c.parent)) colsByTable.set(c.parent, []);
+    colsByTable.get(c.parent).push(c);
+  }
+  // Related tables (joins / fk-reference) → chips on each card.
+  const nameById = new Map(tables.map((t) => [t.id, t.label]));
+  const related = new Map();
+  for (const e of data.edges ?? []) {
+    if (e.data.kind !== "joins" && e.data.kind !== "fk-reference") continue;
+    const a = tableIdOf(e.data.source), b = tableIdOf(e.data.target);
+    if (a === b) continue;
+    for (const [x, y] of [[a, b], [b, a]]) {
+      if (!nameById.has(x) || !nameById.has(y)) continue;
+      if (!related.has(x)) related.set(x, new Set());
+      related.get(x).add(nameById.get(y));
+    }
+  }
+
+  // Group by database, then sort tables (defined-with-columns first, then name).
+  tables.sort((a, b) =>
+    (a.db || "").localeCompare(b.db || "") ||
+    (colsByTable.has(b.id) - colsByTable.has(a.id)) ||
+    a.label.localeCompare(b.label));
+  const dbCounts = {};
+  for (const t of tables) dbCounts[t.db] = (dbCounts[t.db] || 0) + 1;
+
+  const toolbar = `
+    <div class="sc-bar">
+      <div class="sc-dbs">${Object.entries(dbCounts).map(([db, n]) => {
+        const m = dbMeta(db);
+        return `<span class="sc-badge" style="--c:${m.color}">${escHtml(m.label)} · ${n}</span>`;
+      }).join("")}</div>
+      <div class="sc-actions">
+        <button class="sc-expand-all" type="button">expand all</button>
+        <button class="sc-collapse-all" type="button">collapse all</button>
+      </div>
+    </div>`;
+
+  const cards = tables.map((t) => {
+    const m = dbMeta(t.db);
+    const fields = (colsByTable.get(t.id) ?? []).slice().sort((a, b) => {
+      // keys first, then declaration order (stable)
+      return (b.isKey ? 1 : 0) - (a.isKey ? 1 : 0);
+    });
+    const meta = [
+      t.matview ? "materialized view" : "",
+      t.partitionField ? `partition: ${t.partitionField}` : "",
+      t.clusterFields?.length ? `cluster: ${t.clusterFields.join(", ")}` : "",
+      t.subOf ? `subcollection of ${String(t.subOf).replace(/^[a-z]+:/, "")}` : "",
+    ].filter(Boolean);
+    const relChips = related.get(t.id);
+    const searchStr = [t.label, ...fields.map((f) => f.label)].join(" ").toLowerCase();
+
+    const body = fields.length
+      ? `<div class="sc-fields">${fields.map((f) => `
+          <div class="sc-field${f.isKey ? " is-key" : ""}">
+            <span class="f-name">${f.isKey ? "◆ " : ""}${escHtml(f.label)}</span>
+            <span class="f-type">${escHtml(f.fieldType ?? "")}</span>
+            <span class="f-mode${f.mode === "REQUIRED" ? " req" : f.mode === "REPEATED" ? " rep" : ""}">${
+              f.mode === "REQUIRED" ? "required" : f.mode === "REPEATED" ? "repeated" : ""
+            }</span>
+            ${f.description ? `<span class="f-desc" title="${escHtml(f.description)}">${escHtml(f.description)}</span>` : "<span class='f-desc'></span>"}
+          </div>`).join("")}</div>`
+      : `<div class="sc-empty">No static schema — this table is built at runtime (CTAS / load job). Append <code>?live=1</code> to the URL for live introspection.</div>`;
+
+    return `
+      <section class="sc-card" data-db="${escHtml(t.db || "")}" data-search="${escHtml(searchStr)}" style="--c:${m.color}">
+        <header class="sc-head" tabindex="0" role="button" aria-expanded="false">
+          <span class="sc-dot"></span>
+          <span class="sc-name">${escHtml(t.label)}</span>
+          <span class="sc-badge" style="--c:${m.color}">${escHtml(m.label)}</span>
+          <span class="sc-count">${fields.length ? `${fields.length} col${fields.length === 1 ? "" : "s"}` : "schema via ?live=1"}</span>
+          ${meta.length ? `<span class="sc-tmeta">${meta.map((x) => escHtml(x)).join(" · ")}</span>` : ""}
+          <span class="sc-chev">▸</span>
+        </header>
+        <div class="sc-body" hidden>
+          ${body}
+          ${relChips && relChips.size ? `<div class="sc-rel">↔ joins: ${[...relChips].map((r) => `<code>${escHtml(r)}</code>`).join(" ")}</div>` : ""}
+        </div>
+      </section>`;
+  }).join("");
+
+  host.innerHTML = toolbar + `<div class="sc-grid">${cards}</div>`;
+
+  // Interaction: toggle a card; expand/collapse all.
+  host.onclick = (e) => {
+    const target = e.target;
+    if (!(target instanceof Element)) return;
+    if (target.closest(".sc-expand-all")) { setAllCards(host, true); return; }
+    if (target.closest(".sc-collapse-all")) { setAllCards(host, false); return; }
+    const head = target.closest(".sc-head");
+    if (head) toggleCard(head.parentElement);
+  };
+  host.onkeydown = (e) => {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    const head = e.target instanceof Element ? e.target.closest(".sc-head") : null;
+    if (head) { e.preventDefault(); toggleCard(head.parentElement); }
+  };
+}
+
+function toggleCard(card, force) {
+  if (!card) return;
+  const open = force === undefined ? !card.classList.contains("open") : force;
+  card.classList.toggle("open", open);
+  const body = card.querySelector(".sc-body");
+  const head = card.querySelector(".sc-head");
+  if (body) body.hidden = !open;
+  if (head) head.setAttribute("aria-expanded", String(open));
+}
+function setAllCards(host, open) {
+  for (const card of host.querySelectorAll(".sc-card")) {
+    if (card.style.display === "none") continue; // respect active filter
+    toggleCard(card, open);
+  }
+}
+function filterSchemaCards() {
+  const host = $("#schema-cards");
+  if (!host) return;
+  const q = $("#filter").value.trim().toLowerCase();
+  let shown = 0;
+  for (const card of host.querySelectorAll(".sc-card")) {
+    const hit = !q || (card.dataset.search || "").includes(q);
+    card.style.display = hit ? "" : "none";
+    if (hit) shown++;
+    // Auto-expand a card when the query matches one of its columns.
+    if (q && hit && !(card.dataset.search || "").startsWith(q)) toggleCard(card, true);
+    if (!q) toggleCard(card, false);
   }
 }
 
@@ -1119,6 +1298,7 @@ $("#layout").addEventListener("change", () => {
   runLayout();
 });
 $("#filter").addEventListener("input", () => {
+  if (currentKind() === "schemas") { filterSchemaCards(); return; }
   clearFocusClasses();
   applyTextFilter();
 });
@@ -1162,6 +1342,19 @@ for (const k of ["tickets", "dataflow", "schemas", "ai"]) {
   if (el) el.hidden = k !== currentKind();
 }
 
+// Schemas is a CARD view, not a graph: swap the canvas for the card grid, hide
+// graph-only toolbar controls (layout / reset-layout) and the graph legend, and
+// retune the filter placeholder.
+if (currentKind() === "schemas") {
+  const cyEl = $("#cy"); if (cyEl) cyEl.style.display = "none";
+  const cards = $("#schema-cards"); if (cards) cards.hidden = false;
+  const lay = $("#layout");
+  if (lay) { lay.hidden = true; if (lay.previousElementSibling) lay.previousElementSibling.hidden = true; }
+  const reset = $("#reset-layout"); if (reset) reset.hidden = true;
+  const legend = document.getElementById("legend-schemas"); if (legend) legend.hidden = true;
+  const f = $("#filter"); if (f) f.placeholder = "filter tables or columns…";
+}
+
 // AI graph: surface the kind-aware search hint in the filter input
 // placeholder so the behavior is discoverable without a separate UI.
 if (currentKind() === "ai") {
@@ -1198,7 +1391,7 @@ for (const a of document.querySelectorAll("#subnav a")) {
 const GRAPH_TITLES = {
   tickets:     ["Tickets", "depends_on · blocks · related across the .tickets board · click a node to open it"],
   dataflow:    ["Dataflow", "frontend route → container · endpoint → database · click a node to focus its lineage"],
-  schemas:     ["Schemas", "databases · tables × columns × relationships · click a table (▸) to expand its columns · click any node for field details"],
+  schemas:     ["Schemas", "every database table as a card · click a card (▸) to expand its columns · filter by table or column name"],
   ai:          ["AI ecosystem", "skills · agents · hooks · MCP · tools · click a node to focus its lineage"],
 };
 {

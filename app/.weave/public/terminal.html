@@ -27,6 +27,14 @@
         <main class="terminal-page">
             <aside class="term-sidebar">
                 <div class="term-sidebar-head">
+                    <div class="term-bar-row3">
+                        <label class="term-scheme-label" for="term-scheme">theme</label>
+                        <select
+                            id="term-scheme"
+                            class="term-scheme-select"
+                            title="Terminal color scheme"
+                        ></select>
+                    </div>
                     <button
                         type="button"
                         id="term-collapse"
@@ -55,14 +63,6 @@
                             <span class="term-new-text">Terminal</span>
                         </button>
                         <span id="term-cwd-saved" class="term-cwd-saved" hidden>saved ✓</span>
-                    </div>
-                    <div class="term-bar-row3">
-                        <label class="term-scheme-label" for="term-scheme">theme</label>
-                        <select
-                            id="term-scheme"
-                            class="term-scheme-select"
-                            title="Terminal color scheme"
-                        ></select>
                     </div>
                     <p id="term-bar-error" class="term-error" hidden></p>
                 </div>

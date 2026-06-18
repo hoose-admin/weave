@@ -1,6 +1,6 @@
 // Generic, detection-based "dataflow" architecture-diagram graph builder.
 //
-// Renders four layers as a left→right chain:
+// Renders the repo as a left→right chain across four layers:
 //
 //   fe-route ──fetch──▶ endpoint ◀──hosts── container
 //                          │
@@ -8,41 +8,44 @@
 //                          ▼
 //                        store
 //
-// i.e. a page invokes a server action / API endpoint, that endpoint runs inside
-// a deploy container, and the endpoint reads/writes database collections/tables.
+// A page (or SPA route) calls an endpoint; that endpoint runs inside a deploy
+// container; the endpoint (or its container) reads/writes a datastore.
 //
-// This is a GENERIC builder: it detects the stack from the repo rather than
-// hard-wiring any one app's conventions. It is tuned to produce a correct graph
-// for a common web stack (an SSR/App-Router frontend with server-side data
-// functions, a document store, and a single deploy container) but degrades
-// gracefully — an absent layer yields an empty layer plus a warning rather than
-// a crash.
+// FRAMEWORK-AGNOSTIC. This builder does NOT assume a single-package Next.js app
+// at the repo root. It discovers deploy units (Docker containers, compose
+// services, Cloud Run / Fly services), locates each one's source root, detects
+// its language + framework, and runs the matching detectors:
 //
-// Sources of truth (all best-effort, regex-based — no AST dependency, no
-// external deps, Node/Bun builtins only):
-//   • Frontend routes : src/app/**/page.tsx and app/**/page.tsx (route groups
-//                       `(group)` and `@slots` stripped). A route is `cached`
-//                       when a file reachable from the page calls a server
-//                       action through a TanStack Query hook.
-//   • Containers      : Makefile (SERVICE_NAME / `gcloud run deploy <name>`),
-//                       cloudbuild.yaml (deployed service), Dockerfile / fly.toml
-//                       / docker-compose.yml. Falls back to package.json `name`,
-//                       then the repo dir name (with a warning).
-//   • Endpoints       : Server Actions — every exported async fn in a "use server"
-//                       file (under src/actions/ or any file whose head declares
-//                       "use server"). API routes — every src/app/api/**/route.ts.
-//   • Stores          : Firestore collections / subcollections touched by the
-//                       endpoints (`.collection('x')`, `.collectionGroup('x')`,
-//                       `.doc(...).collection('child')`, with `const X = 'name'`
-//                       constants resolved). SQL/BigQuery table names detected
-//                       generically too, if present.
+//   • Containers : docker-compose services (with `build.context` roots), every
+//                  Dockerfile in the tree, Makefile/cloudbuild/fly.toml service
+//                  names. Each gets a source ROOT and a detected language.
+//   • Frontends  : Next.js App Router (app/ or src/app, in ANY subdir),
+//                  Next.js Pages Router (pages/), Vite / CRA + React-Router
+//                  (`<Route path>` / route-object `path:`). Routes are detected
+//                  per frontend, wherever the frontend lives.
+//   • Endpoints  : Python — FastAPI (`@app/@router.<method>` with
+//                  include_router / APIRouter prefixes resolved), Flask
+//                  (`@app/@bp.route`). JavaScript/TS — Next.js server actions
+//                  ("use server"), Next route handlers (app/api/**/route.ts),
+//                  Express (`app/router.<method>`), NestJS (`@Controller` +
+//                  `@Get/@Post`). Each endpoint is attributed to its container.
+//   • Stores     : a broad engine catalog detected by import/usage signature —
+//                  BigQuery, Postgres/MySQL/SQLite (→ sql), Firestore, MongoDB,
+//                  DynamoDB (AWS), S3 (AWS), Cosmos DB (Azure), Redis. Concrete
+//                  table / collection names are mined from SQL string literals
+//                  and `.collection('x')` chains (works on .py and .ts alike);
+//                  engines without minable names get a single labelled node.
+//   • Edges      : frontend route → proxy endpoint → backend endpoint (the
+//                  cross-language bridge is parsed out of `${BACKEND_URL}/path`
+//                  proxy templates), endpoint/container → store, container hosts
+//                  endpoint/route.
 //
 // Output is a FLAT Cytoscape graph — { nodes, edges, meta } — with NO compound
 // `parent` fields (the dashboard's dagre layout throws on them). Nothing is ever
-// silently dropped or capped; anything unresolved is recorded in meta.warnings.
+// silently dropped; an absent layer yields a warning rather than a crash.
 
 import { readdir, readFile, stat } from "node:fs/promises";
-import { basename, dirname, join, relative } from "node:path";
+import { basename, dirname, extname, join, relative } from "node:path";
 import { REPO_ROOT } from "../../weave.config.ts";
 
 // ── Public types ─────────────────────────────────────────────────────────────
@@ -60,11 +63,15 @@ export interface DFNode {
     file?: string; // repo-relative source file
     // container
     platform?: string;
+    lang?: string; // node | python | go | …
+    framework?: string;
     // endpoint
     access?: "server-action" | "api-route";
+    method?: string;
     container?: string; // container node id
     // store
-    db?: "firestore" | "sql" | "bigquery";
+    db?: "firestore" | "sql" | "bigquery" | string;
+    engine?: string; // precise engine when db is a colour-bucket (e.g. "postgres")
   };
 }
 
@@ -96,14 +103,15 @@ export interface DFGraph {
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-// Directories we never descend into / never treat as source.
 const IGNORE_DIRS = new Set([
   "node_modules", ".next", ".git", "dist", "build", "out", ".weave",
   ".venv", "venv", "__pycache__", ".turbo", "coverage", ".cache", "vendor",
   "target", ".idea", ".vscode", ".pytest_cache", ".mypy_cache", ".svelte-kit",
+  "_reference", "research", "plans", "docs",
 ]);
 
 const MAX_REACHABLE_DEPTH = 3; // import-chase depth from a page
+const SRC_EXT = /\.(tsx?|jsx?|mjs|cjs|py|go|rb)$/;
 
 // ── Generic filesystem walk ──────────────────────────────────────────────────
 
@@ -143,6 +151,14 @@ async function exists(p: string): Promise<boolean> {
   }
 }
 
+async function isDir(p: string): Promise<boolean> {
+  try {
+    return (await stat(p)).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 async function readSafe(p: string): Promise<string | null> {
   try {
     return await readFile(p, "utf8");
@@ -152,41 +168,33 @@ async function readSafe(p: string): Promise<string | null> {
 }
 
 function rel(p: string): string {
-  return relative(REPO_ROOT, p);
+  return relative(REPO_ROOT, p) || ".";
 }
 
-// Resolve the Next.js `app/` directory: prefer src/app, fall back to app.
-async function findAppDir(): Promise<string | null> {
-  for (const candidate of [join(REPO_ROOT, "src", "app"), join(REPO_ROOT, "app")]) {
-    if (await exists(candidate)) return candidate;
-  }
-  return null;
+// Cache file reads across the whole build (a container's source is scanned by
+// several detectors).
+const FILE_CACHE = new Map<string, string | null>();
+async function readCached(p: string): Promise<string | null> {
+  if (FILE_CACHE.has(p)) return FILE_CACHE.get(p)!;
+  const v = await readSafe(p);
+  FILE_CACHE.set(p, v);
+  return v;
 }
 
 // ── Matched-brace scanner (shared by several detectors) ──────────────────────
 
-// Return the index of the closer matching the opener at `openIdx`, skipping
-// string/template-literal contents. -1 if unbalanced.
 function matchCloser(src: string, openIdx: number, open: string, close: string): number {
   let depth = 0;
   let inString: string | null = null;
   let escape = false;
   for (let i = openIdx; i < src.length; i++) {
     const c = src[i];
-    if (escape) {
-      escape = false;
-      continue;
-    }
+    if (escape) { escape = false; continue; }
     if (inString) {
-      if (c === "\\") {
-        escape = true;
-        continue;
-      }
+      if (c === "\\") { escape = true; continue; }
       if (c === inString) inString = null;
       continue;
     }
-    // Skip comments so an apostrophe in `// don't` can't open a phantom string
-    // (which would swallow braces and break brace matching).
     if (c === "/" && src[i + 1] === "/") {
       const nl = src.indexOf("\n", i);
       if (nl < 0) return -1;
@@ -199,10 +207,7 @@ function matchCloser(src: string, openIdx: number, open: string, close: string):
       i = end + 1;
       continue;
     }
-    if (c === '"' || c === "'" || c === "`") {
-      inString = c;
-      continue;
-    }
+    if (c === '"' || c === "'" || c === "`") { inString = c; continue; }
     if (c === open) depth++;
     else if (c === close) {
       depth--;
@@ -218,12 +223,7 @@ function escapeRegex(s: string): string {
 
 // ── Route-path normalization ─────────────────────────────────────────────────
 
-// Convert a page file's dir (relative to app/) into a route path:
-//   ""                         → "/"
-//   "campaigns"                → "/campaigns"
-//   "campaigns/[id]"           → "/campaigns/[id]"
-//   "(marketing)/about"        → "/about"      (route group dropped)
-//   "@modal/photo"             → "/photo"      (parallel-route slot dropped)
+// Convert a Next app-router page dir (relative to app/) into a route path.
 function routePathFromRelDir(relDir: string): string {
   const parts = relDir
     .split("/")
@@ -233,549 +233,752 @@ function routePathFromRelDir(relDir: string): string {
   return "/" + parts.join("/");
 }
 
-// Convert an api route.ts file's dir (relative to app/) into a `/api/...` path,
-// preserving `[param]` segments verbatim (matches the ground-truth labels).
-function apiPathFromRelDir(relDir: string): string {
-  const parts = relDir
-    .split("/")
-    .filter((p) => p && p !== ".")
-    .filter((p) => !/^\(.+\)$/.test(p));
-  return "/" + parts.join("/");
+// Normalize ANY URL path for cross-framework matching: collapse param syntaxes
+// ({id}, [id], :id) to a single wildcard, drop trailing slash + query/hash.
+function normPath(p: string): string {
+  let s = p.split(/[?#]/)[0];
+  s = s.replace(/\{[^}/]+\}|\[\.{3}[^\]]+\]|\[[^\]/]+\]|:[A-Za-z_][\w]*/g, "*");
+  s = s.replace(/\/+/g, "/").replace(/\/+$/, "");
+  return s || "/";
 }
 
-// ── Layer: Containers ────────────────────────────────────────────────────────
+// ── Language / framework detection for a source root ─────────────────────────
+
+interface RootInfo {
+  lang: "node" | "python" | "go" | "ruby" | "other";
+  framework?: string; // next | vite | react | express | nestjs | fastapi | flask | django | …
+  pkg?: Record<string, unknown>;
+}
+
+async function readJson(p: string): Promise<Record<string, unknown> | null> {
+  const raw = await readCached(p);
+  if (!raw) return null;
+  try { return JSON.parse(raw) as Record<string, unknown>; } catch { return null; }
+}
+
+async function detectRoot(root: string): Promise<RootInfo> {
+  // Node?
+  const pkg = await readJson(join(root, "package.json"));
+  if (pkg) {
+    const deps = {
+      ...(pkg.dependencies as Record<string, string> | undefined),
+      ...(pkg.devDependencies as Record<string, string> | undefined),
+    };
+    const has = (n: string) => Object.prototype.hasOwnProperty.call(deps, n);
+    let framework: string | undefined;
+    if (has("next")) framework = "next";
+    else if (has("@remix-run/react") || has("@remix-run/node")) framework = "remix";
+    else if (has("@nestjs/core")) framework = "nestjs";
+    else if (has("express")) framework = "express";
+    else if (has("fastify")) framework = "fastify";
+    else if (has("hono")) framework = "hono";
+    else if (has("vite")) framework = "vite";
+    else if (has("@sveltejs/kit")) framework = "sveltekit";
+    else if (has("vue")) framework = "vue";
+    else if (has("react")) framework = "react";
+    return { lang: "node", framework, pkg };
+  }
+  // Python?
+  const pyManifest =
+    (await exists(join(root, "requirements.txt"))) ||
+    (await exists(join(root, "pyproject.toml"))) ||
+    (await exists(join(root, "setup.py"))) ||
+    (await exists(join(root, "Pipfile")));
+  const pyFiles = pyManifest ? [] : await walk(root, (_f, n) => n.endsWith(".py"));
+  if (pyManifest || pyFiles.length) {
+    // Sniff the web framework from manifest + a sample of source.
+    let blob = "";
+    for (const f of ["requirements.txt", "pyproject.toml", "Pipfile", "main.py", "app.py", "server.py", "asgi.py", "wsgi.py"]) {
+      blob += (await readCached(join(root, f))) ?? "";
+    }
+    if (blob.length < 200) {
+      for (const f of (pyFiles.length ? pyFiles : await walk(root, (_x, n) => n.endsWith(".py"))).slice(0, 12)) {
+        blob += (await readCached(f)) ?? "";
+      }
+    }
+    let framework: string | undefined;
+    if (/\bfastapi\b|from\s+fastapi|FastAPI\(/i.test(blob)) framework = "fastapi";
+    else if (/\bflask\b|from\s+flask|Flask\(/i.test(blob)) framework = "flask";
+    else if (/\bdjango\b/i.test(blob)) framework = "django";
+    return { lang: "python", framework };
+  }
+  if (await exists(join(root, "go.mod"))) return { lang: "go", framework: "go" };
+  if ((await exists(join(root, "Gemfile"))) || (await exists(join(root, "config.ru")))) {
+    return { lang: "ruby", framework: "rails" };
+  }
+  return { lang: "other" };
+}
+
+// ── Layer: Containers (deploy units with source roots) ───────────────────────
 
 interface Container {
   id: string;
   name: string;
   platform?: string;
-  file?: string; // repo-relative source the name came from
+  file?: string;
+  root: string; // absolute source root
+  info?: RootInfo;
 }
 
-// Detect the repo's deploy unit(s). We parse, in priority order, the files that
-// declare a deployed service name. For the common single-service case this
-// yields exactly one container.
+function resolveContextDir(composeDir: string, ctx: string): string {
+  const c = ctx.trim().replace(/^["']|["']$/g, "");
+  if (c.startsWith("/")) return c;
+  return join(composeDir, c);
+}
+
 async function detectContainers(
   warnings: { kind: string; detail: string }[],
 ): Promise<Container[]> {
-  const found: Container[] = [];
-  const seenNames = new Set<string>();
-  const add = (name: string, platform: string | undefined, file: string) => {
-    if (!name || seenNames.has(name)) return;
-    seenNames.add(name);
-    found.push({ id: `container:${name}`, name, platform, file });
+  const byName = new Map<string, Container>();
+  const byRoot = new Map<string, Container>();
+  const add = (name: string, platform: string | undefined, file: string, root: string) => {
+    if (!name) return;
+    const existing = byRoot.get(root);
+    if (existing) {
+      // Prefer a real service name + platform over a generic Dockerfile guess.
+      if (platform && !existing.platform) existing.platform = platform;
+      return;
+    }
+    if (byName.has(name)) name = `${name}@${basename(dirname(root)) || basename(root)}`;
+    const c: Container = { id: `container:${name}`, name, platform, file, root };
+    byName.set(name, c);
+    byRoot.set(root, c);
   };
 
-  // 1) Makefile — SERVICE_NAME assignment and/or `gcloud run deploy <name>`.
-  const makefile = join(REPO_ROOT, "Makefile");
-  const mk = await readSafe(makefile);
-  if (mk) {
-    const isCloudRun = /gcloud\s+run\s+deploy/.test(mk);
-    const platform = isCloudRun ? "Cloud Run" : undefined;
-    // SERVICE_NAME := <service-name>   (Make's := / = / ?= assignment forms)
-    const svc = mk.match(/^\s*SERVICE_NAME\s*[:?]?=\s*([A-Za-z0-9_.-]+)/m);
-    if (svc && !svc[1].startsWith("$")) add(svc[1], platform, rel(makefile));
-    // `gcloud run deploy <literal-name>` (skip `$(VAR)` / `${VAR}` forms).
-    const dep = mk.match(/gcloud\s+run\s+deploy\s+([A-Za-z0-9_.-]+)/);
-    if (dep && !dep[1].startsWith("$")) add(dep[1], "Cloud Run", rel(makefile));
-  }
-
-  // 2) cloudbuild.yaml — the deployed Cloud Run service name. Cloud Build files
-  //    usually parametrize it via `_SERVICE_NAME: 'name'` substitutions.
-  for (const cbName of ["cloudbuild.yaml", "cloudbuild.yml"]) {
-    const cbPath = join(REPO_ROOT, cbName);
-    const cb = await readSafe(cbPath);
-    if (!cb) continue;
-    const sub = cb.match(/_SERVICE_NAME\s*:\s*['"]?([A-Za-z0-9_.-]+)['"]?/);
-    if (sub && !sub[1].startsWith("$")) add(sub[1], "Cloud Run", rel(cbPath));
-  }
-
-  // 3) fly.toml — `app = "name"`.
-  const flyPath = join(REPO_ROOT, "fly.toml");
-  const fly = await readSafe(flyPath);
-  if (fly) {
-    const app = fly.match(/^\s*app\s*=\s*["']([A-Za-z0-9_.-]+)["']/m);
-    if (app) add(app[1], "Fly.io", rel(flyPath));
-  }
-
-  // 4) docker-compose.yml — top-level `services:` keys (each is a container).
-  for (const dcName of ["docker-compose.yml", "docker-compose.yaml", "compose.yaml"]) {
+  // 1) docker-compose services (with build contexts → per-service source root).
+  for (const dcName of ["docker-compose.yml", "docker-compose.yaml", "compose.yaml", "compose.yml"]) {
     const dcPath = join(REPO_ROOT, dcName);
-    const dc = await readSafe(dcPath);
+    const dc = await readCached(dcPath);
     if (!dc) continue;
+    const dcDir = dirname(dcPath);
     const lines = dc.split("\n");
     let inServices = false;
-    for (const line of lines) {
-      if (/^services\s*:/.test(line)) {
-        inServices = true;
+    let curSvc: string | null = null;
+    let curSvcIndent = -1;
+    let curContext: string | null = null;
+    let pendingInlineBuild: string | null = null;
+    const flush = () => {
+      if (!curSvc) return;
+      const ctx = curContext ?? pendingInlineBuild;
+      const root = ctx ? resolveContextDir(dcDir, ctx) : REPO_ROOT;
+      add(curSvc, "Docker Compose", rel(dcPath), root);
+    };
+    for (const raw of lines) {
+      const line = raw.replace(/\t/g, "  ");
+      if (/^services\s*:/.test(line)) { inServices = true; continue; }
+      if (!inServices) continue;
+      if (/^\S/.test(line) && !/^\s*#/.test(line)) { flush(); inServices = false; continue; }
+      const svc = line.match(/^(\s{2,})([A-Za-z0-9_.-]+)\s*:\s*$/);
+      if (svc && (curSvcIndent < 0 || svc[1].length <= curSvcIndent)) {
+        flush();
+        curSvc = svc[2];
+        curSvcIndent = svc[1].length;
+        curContext = null;
+        pendingInlineBuild = null;
         continue;
       }
-      if (inServices) {
-        // Leaving the services block: a non-indented, non-blank, non-comment line.
-        if (/^\S/.test(line) && !/^\s*#/.test(line)) break;
-        const svc = line.match(/^\s{2}([A-Za-z0-9_.-]+)\s*:/);
-        if (svc) add(svc[1], "Docker Compose", rel(dcPath));
-      }
+      if (!curSvc) continue;
+      const inlineBuild = line.match(/^\s+build\s*:\s*(\S.*)$/);
+      if (inlineBuild && !/^\s*$/.test(inlineBuild[1])) pendingInlineBuild = inlineBuild[1];
+      const ctx = line.match(/^\s+context\s*:\s*(\S.*)$/);
+      if (ctx) curContext = ctx[1];
+    }
+    flush();
+  }
+
+  // 2) Every Dockerfile in the tree → a container rooted at its directory.
+  for (const df of await walk(REPO_ROOT, (_f, n) => n === "Dockerfile" || /^Dockerfile\./.test(n))) {
+    const root = dirname(df);
+    if (byRoot.has(root)) continue;
+    const name = basename(root) === basename(REPO_ROOT) ? (basename(root) || "app") : basename(root);
+    add(name, "Docker", rel(df), root);
+  }
+
+  // 3) Service-name declarations that don't carry a distinct source root
+  //    (Makefile / cloudbuild / fly) — only add if we found nothing yet.
+  if (byRoot.size === 0) {
+    const mk = await readCached(join(REPO_ROOT, "Makefile"));
+    if (mk) {
+      const isCloudRun = /gcloud\s+run\s+deploy/.test(mk);
+      const svc = mk.match(/^\s*SERVICE_NAME\s*[:?]?=\s*([A-Za-z0-9_.-]+)/m);
+      if (svc && !svc[1].startsWith("$")) add(svc[1], isCloudRun ? "Cloud Run" : undefined, rel(join(REPO_ROOT, "Makefile")), REPO_ROOT);
+      const dep = mk.match(/gcloud\s+run\s+deploy\s+([A-Za-z0-9_.-]+)/);
+      if (dep && !dep[1].startsWith("$")) add(dep[1], "Cloud Run", rel(join(REPO_ROOT, "Makefile")), REPO_ROOT);
+    }
+    for (const cbName of ["cloudbuild.yaml", "cloudbuild.yml"]) {
+      const cb = await readCached(join(REPO_ROOT, cbName));
+      if (!cb) continue;
+      const sub = cb.match(/_SERVICE_NAME\s*:\s*['"]?([A-Za-z0-9_.-]+)['"]?/);
+      if (sub && !sub[1].startsWith("$")) add(sub[1], "Cloud Run", cbName, REPO_ROOT);
+    }
+    const fly = await readCached(join(REPO_ROOT, "fly.toml"));
+    if (fly) {
+      const app = fly.match(/^\s*app\s*=\s*["']([A-Za-z0-9_.-]+)["']/m);
+      if (app) add(app[1], "Fly.io", "fly.toml", REPO_ROOT);
     }
   }
 
-  if (found.length > 0) return found;
-
-  // 5) Fallback: a Dockerfile or next.config exists ⇒ a single container named
-  //    from package.json `name`.
-  const hasDockerfile = await exists(join(REPO_ROOT, "Dockerfile"));
-  const hasNextConfig =
-    (await exists(join(REPO_ROOT, "next.config.ts"))) ||
-    (await exists(join(REPO_ROOT, "next.config.js"))) ||
-    (await exists(join(REPO_ROOT, "next.config.mjs")));
-  const pkg = await readSafe(join(REPO_ROOT, "package.json"));
-  let pkgName: string | undefined;
-  if (pkg) {
-    try {
-      pkgName = (JSON.parse(pkg) as { name?: string }).name;
-    } catch {
-      /* malformed package.json — ignore */
-    }
-  }
-  if ((hasDockerfile || hasNextConfig) && pkgName) {
-    add(pkgName, hasDockerfile ? "Docker" : undefined, "package.json");
-    return found;
+  // 4) Truly nothing: a single container named after the repo dir + warn.
+  if (byRoot.size === 0) {
+    const dirName = basename(REPO_ROOT) || "app";
+    warnings.push({
+      kind: "no-container-detected",
+      detail: `No compose/Dockerfile/Makefile/cloudbuild/fly.toml found — using repo dir name "${dirName}"`,
+    });
+    add(dirName, undefined, ".", REPO_ROOT);
   }
 
-  // 6) Truly nothing detected: one container named after the repo dir + warn.
-  const dirName = basename(REPO_ROOT) || "app";
-  warnings.push({
-    kind: "no-container-detected",
-    detail: `No Makefile/cloudbuild/Dockerfile/fly.toml/compose service found — using repo dir name "${dirName}"`,
-  });
-  add(dirName, undefined, ".");
-  return found;
+  const containers = [...byRoot.values()];
+  for (const c of containers) c.info = await detectRoot(c.root);
+  return containers;
 }
 
-// ── Layer: Endpoints (server actions + api routes) ───────────────────────────
+// Pick the container that owns a file: the one whose root is the deepest
+// ancestor of the file. Falls back to null (→ attributed at graph level).
+function ownerContainer(file: string, containers: Container[]): Container | null {
+  let best: Container | null = null;
+  for (const c of containers) {
+    if (file === c.root || file.startsWith(c.root + "/")) {
+      if (!best || c.root.length > best.root.length) best = c;
+    }
+  }
+  return best;
+}
 
-interface Endpoint {
+// ══════════════════════════════════════════════════════════════════════════
+//  FRONTEND ROUTE DETECTION
+// ══════════════════════════════════════════════════════════════════════════
+
+interface Route {
   id: string;
-  name: string; // label
-  access: "server-action" | "api-route";
-  file: string; // repo-relative
-  absFile: string; // absolute (for body parsing)
-  fnName?: string; // server actions: the exported function name
-  reads: Set<string>; // store names
-  writes: Set<string>; // store names
+  path: string;
+  file: string;
+  containerId?: string;
+  cached: boolean;
+  reachable: string[]; // abs files reachable from the page (for fetch matching)
 }
 
-// True if a file's first few non-empty lines declare "use server"/'use server'.
-function declaresUseServer(src: string): boolean {
-  const head = src
-    .split("\n")
-    .map((l) => l.trim())
-    .filter((l) => l.length > 0)
-    .slice(0, 3);
-  return head.some((l) => /^["']use server["'];?$/.test(l));
-}
-
-// Collect every file that is a server-action module: under src/actions/ (or
-// actions/), OR any .ts/.tsx file whose head declares "use server".
-async function findServerActionFiles(appDir: string | null): Promise<string[]> {
-  const files = new Set<string>();
-
-  // Explicit actions dirs.
-  for (const actionsDir of [join(REPO_ROOT, "src", "actions"), join(REPO_ROOT, "actions")]) {
-    if (!(await exists(actionsDir))) continue;
-    for (const f of await walk(actionsDir, (_full, n) => /\.tsx?$/.test(n))) {
-      files.add(f);
-    }
+async function findFirstDir(root: string, candidates: string[][]): Promise<string | null> {
+  for (const parts of candidates) {
+    const d = join(root, ...parts);
+    if (await isDir(d)) return d;
   }
-
-  // Any other "use server" file under src/ (or the app dir). We deliberately do
-  // NOT scan api route handlers here — those are api-route endpoints, handled
-  // separately even though they may also be marked "use server".
-  const srcRoot = (await exists(join(REPO_ROOT, "src"))) ? join(REPO_ROOT, "src") : REPO_ROOT;
-  const apiPrefix = appDir ? join(appDir, "api") : null;
-  for (const f of await walk(srcRoot, (_full, n) => /\.tsx?$/.test(n))) {
-    if (files.has(f)) continue;
-    if (apiPrefix && f.startsWith(apiPrefix + "/")) continue; // api route, not action
-    if (basename(f) === "route.ts" || basename(f) === "route.tsx") continue;
-    const src = await readSafe(f);
-    if (src && declaresUseServer(src)) files.add(f);
-  }
-
-  return [...files];
-}
-
-// Extract exported async function names from a server-action source file.
-// Matches `export async function NAME(` and
-// `export const NAME = async (` / `export const NAME = async function`.
-function extractExportedAsyncFns(src: string): string[] {
-  const names = new Set<string>();
-  let m: RegExpExecArray | null;
-
-  const fnDecl = /export\s+async\s+function\s+([A-Za-z_$][\w$]*)\s*\(/g;
-  while ((m = fnDecl.exec(src))) names.add(m[1]);
-
-  const constArrow = /export\s+const\s+([A-Za-z_$][\w$]*)\s*(?::[^=]+)?=\s*async\b/g;
-  while ((m = constArrow.exec(src))) names.add(m[1]);
-
-  return [...names];
-}
-
-// Find the function-BODY opening brace, starting just after the parameter
-// list's closing `)`. A TypeScript return-type annotation sits between `)` and
-// the body `{` and may itself contain braces/brackets/angles, e.g.
-//   ): Promise<{ success: boolean; markerId?: string }> {
-// We must skip that whole type expression. We scan forward tracking `<>`, `()`,
-// `[]` and type-level `{}` depth; the body `{` is the first `{` encountered at
-// all-zero bracket depth. (Quotes are skipped so a `{` in a string can't fool
-// us.) Returns the index of the body `{`, or -1.
-function findBodyBrace(src: string, afterParen: number): number {
-  let i = afterParen + 1;
-  let angle = 0,
-    paren = 0,
-    bracket = 0,
-    brace = 0;
-  let inString: string | null = null;
-  let escape = false;
-  for (; i < src.length; i++) {
-    const c = src[i];
-    if (escape) {
-      escape = false;
-      continue;
-    }
-    if (inString) {
-      if (c === "\\") escape = true;
-      else if (c === inString) inString = null;
-      continue;
-    }
-    if (c === '"' || c === "'" || c === "`") {
-      inString = c;
-      continue;
-    }
-    if (c === "<") angle++;
-    else if (c === ">") {
-      if (angle > 0) angle--;
-    } else if (c === "(") paren++;
-    else if (c === ")") paren--;
-    else if (c === "[") bracket++;
-    else if (c === "]") bracket--;
-    else if (c === "{") {
-      if (angle === 0 && paren === 0 && bracket === 0 && brace === 0) return i; // body brace
-      brace++;
-    } else if (c === "}") {
-      if (brace > 0) brace--;
-    }
-  }
-  return -1;
-}
-
-// Slice a source file into per-top-level-function bodies. Returns a map of
-// function name → body text (from the body `{` to its matching `}`). Covers both
-// `function NAME(...): T {` and `const NAME = async (...): T => {` forms. Used
-// to attribute reads/writes to the exact function that performs them.
-function sliceFunctionBodies(src: string): Map<string, string> {
-  const bodies = new Map<string, string>();
-
-  // function-declaration form (async optional, export optional).
-  const fnRe = /(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(/g;
-  let m: RegExpExecArray | null;
-  while ((m = fnRe.exec(src))) {
-    const name = m[1];
-    const parenStart = m.index + m[0].length - 1;
-    const parenEnd = matchCloser(src, parenStart, "(", ")");
-    if (parenEnd < 0) continue;
-    const braceStart = findBodyBrace(src, parenEnd);
-    if (braceStart < 0) continue;
-    const braceEnd = matchCloser(src, braceStart, "{", "}");
-    if (braceEnd < 0) continue;
-    bodies.set(name, src.slice(braceStart, braceEnd + 1));
-  }
-
-  // arrow-function form: `const NAME = async (...): T => { ... }` (export
-  // optional). The `=>` follows any return-type annotation; we search a generous
-  // window after the params for it, then take the next block `{` as the body.
-  const arrowRe = /(?:export\s+)?const\s+([A-Za-z_$][\w$]*)\s*(?::[^=]+)?=\s*(?:async\s*)?\(/g;
-  while ((m = arrowRe.exec(src))) {
-    const name = m[1];
-    if (bodies.has(name)) continue;
-    const parenStart = m.index + m[0].length - 1;
-    const parenEnd = matchCloser(src, parenStart, "(", ")");
-    if (parenEnd < 0) continue;
-    const after = src.slice(parenEnd + 1, parenEnd + 400);
-    const arrowRel = after.indexOf("=>");
-    if (arrowRel < 0) continue;
-    const braceStart = src.indexOf("{", parenEnd + 1 + arrowRel + 2);
-    if (braceStart < 0) continue;
-    // Guard: a concise-body arrow `=> (expr)` has no block — only accept a `{`
-    // that immediately follows the `=>` (ignoring whitespace).
-    const between = src.slice(parenEnd + 1 + arrowRel + 2, braceStart);
-    if (between.trim() !== "") continue;
-    const braceEnd = matchCloser(src, braceStart, "{", "}");
-    if (braceEnd < 0) continue;
-    bodies.set(name, src.slice(braceStart, braceEnd + 1));
-  }
-
-  return bodies;
-}
-
-// ── Firestore (and generic SQL/BQ) store extraction ──────────────────────────
-
-// Collection-name constants declared at module scope, e.g.
-//   const CHARACTERS_COLLECTION = 'characters';
-// Maps the constant identifier → the literal collection name.
-function collectionConstants(src: string): Map<string, string> {
-  const out = new Map<string, string>();
-  const re = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*["'`]([A-Za-z0-9_./-]+)["'`]/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(src))) out.set(m[1], m[2]);
-  return out;
-}
-
-// Resolve a `.collection(<arg>)` argument to a literal collection name, using
-// the module-scope constant table. Returns null for computed/dynamic args.
-function resolveCollectionArg(arg: string, consts: Map<string, string>): string | null {
-  const t = arg.trim();
-  const lit = t.match(/^["'`]([A-Za-z0-9_./-]+)["'`]$/);
-  if (lit) return lit[1];
-  if (consts.has(t)) return consts.get(t)!;
   return null;
 }
 
-// Read the right-hand side of an assignment, starting just after the `=`, up to
-// the statement-terminating `;` at the SAME bracket depth (so a `;` nested in a
-// callback/object/array does not end it). Strings and comments are skipped.
-function readRhs(src: string, start: number): string {
-  let depth = 0; // combined () [] {} depth
-  let inString: string | null = null;
-  let escape = false;
-  let i = start;
-  for (; i < src.length; i++) {
-    const c = src[i];
-    if (escape) {
-      escape = false;
-      continue;
-    }
-    if (inString) {
-      if (c === "\\") escape = true;
-      else if (c === inString) inString = null;
-      continue;
-    }
-    if (c === "/" && src[i + 1] === "/") {
-      const nl = src.indexOf("\n", i);
-      i = nl < 0 ? src.length : nl;
-      continue;
-    }
-    if (c === "/" && src[i + 1] === "*") {
-      const end = src.indexOf("*/", i + 2);
-      i = end < 0 ? src.length : end + 1;
-      continue;
-    }
-    if (c === '"' || c === "'" || c === "`") {
-      inString = c;
-      continue;
-    }
-    if (c === "(" || c === "[" || c === "{") depth++;
-    else if (c === ")" || c === "]" || c === "}") {
-      if (depth === 0) break; // unbalanced closer ends the RHS (e.g. inside args)
-      depth--;
-    } else if ((c === ";" || c === ",") && depth === 0) {
-      break;
-    }
+// Next.js App Router pages under app/ (or src/app).
+async function nextAppRoutes(root: string, containerId: string): Promise<Route[]> {
+  const appDir = await findFirstDir(root, [["app"], ["src", "app"]]);
+  if (!appDir) return [];
+  const pages = await walk(appDir, (_f, n) => /^page\.(tsx|jsx|ts|js)$/.test(n));
+  const routes: Route[] = [];
+  for (const pageFile of pages) {
+    const relDir = relative(appDir, dirname(pageFile));
+    const path = routePathFromRelDir(relDir);
+    routes.push({ id: `route:${containerId}:${path}`, path, file: rel(pageFile), containerId, cached: false, reachable: [] });
   }
-  return src.slice(start, i);
+  return routes;
 }
 
-// Build a per-function map of `<varName>` → resolved collection name, for refs
-// bound to a Firestore collection chain. Handles:
-//   const ref = firestore.collection(C).doc(id).collection('child').doc()
-//        → ref ↦ 'child'   (nearest/last .collection in the chain wins)
-//   const childRef = parentRef.collection('child')
-//        → childRef ↦ 'child'
-//   const characterRef = firestore.collection(C).doc(id)
-//        → characterRef ↦ <C>   (only a .collection earlier in the chain)
-// Resolution is iterated so that refs built from other refs settle.
-function collectionBindings(
-  body: string,
-  consts: Map<string, string>,
-): Map<string, string> {
-  const bindings = new Map<string, string>();
-
-  // Capture EVERY `const/let/var VAR = <rhs>` assignment. The RHS runs to the
-  // statement-terminating `;` at the SAME nesting depth as the assignment — NOT
-  // the first `;` anywhere (a naive lazy `[\s\S]*?;` would stop at a `;` nested
-  // inside a callback, e.g. `const stream = new ReadableStream({ start(){ const
-  // notesRef = ...; ... } })`, truncating the RHS and skipping the inner
-  // declarations). We find each `NAME =` non-consumingly, then read its RHS with
-  // a depth-aware scan. We keep ALL assignments (not just `.collection(...)`
-  // ones) so refs/queries built from an already-bound ref inherit its
-  // collection: `const query = notesRef.where(...).limit(50)`.
-  type Pending = { name: string; rhs: string };
-  const pending: Pending[] = [];
-  const declRe = /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=/g;
-  let m: RegExpExecArray | null;
-  while ((m = declRe.exec(body))) {
-    const rhsStart = m.index + m[0].length;
-    const rhs = readRhs(body, rhsStart);
-    pending.push({ name: m[1], rhs });
+// Next.js Pages Router under pages/ (or src/pages) — excludes _app/_document, api/.
+async function nextPagesRoutes(root: string, containerId: string): Promise<Route[]> {
+  const pagesDir = await findFirstDir(root, [["pages"], ["src", "pages"]]);
+  if (!pagesDir) return [];
+  const files = await walk(pagesDir, (_f, n) => /\.(tsx|jsx|ts|js)$/.test(n));
+  const routes: Route[] = [];
+  for (const f of files) {
+    const relPath = relative(pagesDir, f);
+    if (relPath.startsWith("api/") || relPath.startsWith("api\\")) continue; // api routes = endpoints
+    const segs = relPath.replace(/\.(tsx|jsx|ts|js)$/, "").split("/");
+    const last = segs[segs.length - 1];
+    if (/^_/.test(last)) continue; // _app, _document, _error
+    if (last === "index") segs.pop();
+    const path = "/" + segs.filter((s) => s && !/^\(.+\)$/.test(s)).join("/");
+    routes.push({ id: `route:${containerId}:${path || "/"}`, path: path || "/", file: rel(f), containerId, cached: false, reachable: [] });
   }
+  return routes;
+}
 
-  // The LAST `.collection('x')` / `.collectionGroup('x')` in the RHS whose arg
-  // resolves to a literal (a subcollection's child name wins over its parent).
-  const lastResolvedCollection = (rhs: string): string | null => {
-    let result: string | null = null;
-    const collRe = /\.collection(?:Group)?\s*\(\s*([^)]*?)\s*\)/g;
-    let cm: RegExpExecArray | null;
-    while ((cm = collRe.exec(rhs))) {
-      const resolved = resolveCollectionArg(cm[1], consts);
-      if (resolved) result = resolved; // keep last resolvable
+// Vite / CRA / generic React-Router: mine `<Route path="...">` and route-object
+// `path: "..."` literals from the source tree.
+async function reactRouterRoutes(root: string, containerId: string): Promise<Route[]> {
+  const srcDir = (await isDir(join(root, "src"))) ? join(root, "src") : root;
+  const files = await walk(srcDir, (_f, n) => /\.(tsx|jsx|ts|js)$/.test(n));
+  const paths = new Map<string, string>(); // path → file
+  const jsxRe = /<Route\b[^>]*\bpath\s*=\s*["'{]([^"'}]+)["'}]/g;
+  const objRe = /\bpath\s*:\s*["']([^"']+)["']/g;
+  for (const f of files) {
+    const src = await readCached(f);
+    if (!src) continue;
+    const looksRouter = /react-router|createBrowserRouter|<Route\b|RouterProvider/.test(src);
+    if (!looksRouter) continue;
+    let m: RegExpExecArray | null;
+    jsxRe.lastIndex = 0;
+    while ((m = jsxRe.exec(src))) {
+      const p = m[1].startsWith("/") ? m[1] : "/" + m[1];
+      if (!paths.has(p)) paths.set(p, rel(f));
     }
-    return result;
-  };
-
-  // Pass 1: direct resolution — the RHS chain contains a resolvable `.collection`.
-  for (const p of pending) {
-    const c = lastResolvedCollection(p.rhs);
-    if (c) bindings.set(p.name, c);
+    objRe.lastIndex = 0;
+    while ((m = objRe.exec(src))) {
+      const raw = m[1];
+      if (!raw || raw.includes(" ")) continue; // skip non-path strings
+      const p = raw.startsWith("/") ? raw : "/" + raw;
+      if (!paths.has(p)) paths.set(p, rel(f));
+    }
   }
+  const routes: Route[] = [];
+  for (const [path, file] of paths) {
+    routes.push({ id: `route:${containerId}:${path}`, path, file, containerId, cached: false, reachable: [] });
+  }
+  return routes;
+}
 
-  // Pass 2: iterate so refs/queries built from another bound var settle, e.g.
-  //   const notesRef = firestore.collection('campaigns').doc(id).collection('notes'); // notes (pass 1)
-  //   const query    = notesRef.where(...).orderBy(...).limit(50);                     // inherits notes
-  //   const childRef = parentRef.doc(id);                                              // inherits parentRef
-  // A var inherits its base var's collection only when its OWN chain has no
-  // resolvable collection (otherwise pass 1 already bound it).
-  for (let iter = 0; iter < 6; iter++) {
-    let changed = false;
-    for (const p of pending) {
-      if (bindings.has(p.name)) continue;
-      const baseVar = p.rhs.match(/^\s*(?:await\s+)?([A-Za-z_$][\w$]*)\b/);
-      if (baseVar && bindings.has(baseVar[1]) && lastResolvedCollection(p.rhs) === null) {
-        bindings.set(p.name, bindings.get(baseVar[1])!);
-        changed = true;
+async function detectFrontendRoutes(c: Container, warnings: { kind: string; detail: string }[]): Promise<Route[]> {
+  const fw = c.info?.framework;
+  if (c.info?.lang !== "node") return [];
+  let routes: Route[] = [];
+  if (fw === "next" || fw === "remix") {
+    routes = await nextAppRoutes(c.root, c.id);
+    if (routes.length === 0) routes = await nextPagesRoutes(c.root, c.id);
+  } else if (fw === "vite" || fw === "react" || fw === "vue" || fw === "sveltekit") {
+    routes = await reactRouterRoutes(c.root, c.id);
+    if (routes.length === 0) {
+      // A bundled SPA with no detectable route table still has an entry point.
+      const hasEntry =
+        (await exists(join(c.root, "index.html"))) ||
+        (await exists(join(c.root, "src", "main.tsx"))) ||
+        (await exists(join(c.root, "src", "main.jsx"))) ||
+        (await exists(join(c.root, "src", "App.tsx")));
+      if (hasEntry) {
+        routes = [{ id: `route:${c.id}:/`, path: "/", file: rel(c.root), containerId: c.id, cached: false, reachable: [] }];
+        warnings.push({ kind: "spa-no-routes", detail: `${c.name}: ${fw} app with no detectable route table — showing a single root route` });
       }
     }
-    if (!changed) break;
   }
-
-  return bindings;
+  return routes;
 }
 
-// Mutating Firestore terminal calls ⇒ a write. `.get()`/`.onSnapshot(` ⇒ read.
-const WRITE_OPS = ["set", "add", "update", "create", "delete"];
-const READ_OPS = ["get", "onSnapshot"];
+// ══════════════════════════════════════════════════════════════════════════
+//  ENDPOINT DETECTION
+// ══════════════════════════════════════════════════════════════════════════
 
-// Attribute Firestore reads/writes for one function body to store (collection)
-// names. Strategy: for every terminal operation call (`.get()`, `.set(`, etc.),
-// resolve the collection it acts on:
-//   (a) the nearest preceding `.collection('x')`/`.collectionGroup('x')` in the
-//       SAME statement/expression chain, else
-//   (b) the collection bound to the receiver variable (`markerRef.update(...)`).
-// Subcollections resolve to the child collection name (it is still a store).
-function extractFirestoreStores(
-  body: string,
-  consts: Map<string, string>,
-): { reads: Set<string>; writes: Set<string> } {
-  const reads = new Set<string>();
-  const writes = new Set<string>();
-  const bindings = collectionBindings(body, consts);
+interface Endpoint {
+  id: string;
+  label: string;
+  access: "server-action" | "api-route";
+  method?: string;
+  path?: string; // routable path (for fetch matching)
+  file: string; // repo-relative
+  absFile: string;
+  containerId: string;
+  proxyTo: string[]; // backend paths this endpoint forwards to (proxy routes)
+  reads: Set<string>;
+  writes: Set<string>;
+}
 
-  // First, record collections touched by inline chains. We scan each terminal
-  // op call and look back within a bounded window for `.collection(...)` in the
-  // same chain (no intervening statement terminator at depth 0).
-  const opRe = new RegExp(
-    `\\.(${[...WRITE_OPS, ...READ_OPS].join("|")})\\s*\\(`,
-    "g",
-  );
+const HTTP_METHODS = ["get", "post", "put", "patch", "delete", "head", "options"];
+
+// ── Python: FastAPI ──────────────────────────────────────────────────────────
+
+// Resolve mount prefixes from `include_router(<expr>, prefix="...")` calls across
+// the container. Keyed by "<moduleHint>.<varName>" and bare "<varName>".
+function fastapiMountIndex(blob: string): Map<string, string> {
+  const idx = new Map<string, string>();
+  const re = /include_router\s*\(\s*([A-Za-z_][\w.]*)\s*(?:,\s*prefix\s*=\s*["']([^"']*)["'])?/g;
   let m: RegExpExecArray | null;
-  while ((m = opRe.exec(body))) {
-    const op = m[1];
-    const isWrite = WRITE_OPS.includes(op);
-    const callPos = m.index;
+  while ((m = re.exec(blob))) {
+    const expr = m[1];
+    const prefix = m[2] ?? "";
+    const parts = expr.split(".");
+    const varName = parts[parts.length - 1];
+    const moduleHint = parts.length >= 2 ? parts[parts.length - 2] : "";
+    idx.set(`${moduleHint}.${varName}`, prefix);
+    if (!idx.has(varName)) idx.set(varName, prefix);
+  }
+  return idx;
+}
 
-    // Walk backward from the op to find the chain root and the nearest
-    // resolvable `.collection('x')`. We look back up to ~600 chars but stop at a
-    // statement boundary (`;` or `{`/`}`) that is not inside the chain.
-    const lookbackStart = Math.max(0, callPos - 800);
-    const segment = body.slice(lookbackStart, callPos);
+async function fastapiEndpoints(c: Container): Promise<Endpoint[]> {
+  const files = await walk(c.root, (_f, n) => n.endsWith(".py"));
+  // First pass: global mount index from every file.
+  let blob = "";
+  for (const f of files) blob += (await readCached(f)) ?? "";
+  const mounts = fastapiMountIndex(blob);
 
-    // Nearest `.collection('x')` / `.collectionGroup('x')` before this op.
-    let collName: string | null = null;
-    const collRe = /\.collection(?:Group)?\s*\(\s*([^)]*?)\s*\)/g;
-    let cm: RegExpExecArray | null;
-    let lastCollEnd = -1;
-    while ((cm = collRe.exec(segment))) {
-      const resolved = resolveCollectionArg(cm[1], consts);
-      if (resolved) {
-        collName = resolved;
-        lastCollEnd = cm.index + cm[0].length;
+  const endpoints: Endpoint[] = [];
+  const seen = new Set<string>();
+  for (const f of files) {
+    const src = await readCached(f);
+    if (!src) continue;
+    if (!/@\w+\.(get|post|put|patch|delete|head|options)\s*\(/.test(src)) continue;
+    const moduleHint = basename(dirname(f)) === basename(c.root) ? basename(f).replace(/\.py$/, "") : basename(dirname(f));
+    const fileHint = basename(f).replace(/\.py$/, "");
+
+    // Local APIRouter prefixes declared in this file: `var = APIRouter(prefix="..")`.
+    const localPrefix = new Map<string, string>();
+    const apr = /([A-Za-z_]\w*)\s*=\s*APIRouter\s*\(([^)]*)\)/g;
+    let a: RegExpExecArray | null;
+    while ((a = apr.exec(src))) {
+      const pm = a[2].match(/prefix\s*=\s*["']([^"']*)["']/);
+      localPrefix.set(a[1], pm ? pm[1] : "");
+    }
+
+    const decoRe = /@([A-Za-z_]\w*)\.(get|post|put|patch|delete|head|options)\s*\(\s*([fr]?["'])([^"']*)\3/g;
+    let m: RegExpExecArray | null;
+    while ((m = decoRe.exec(src))) {
+      const varName = m[1];
+      const method = m[2].toUpperCase();
+      const decoPath = m[4];
+      const mount =
+        mounts.get(`${moduleHint}.${varName}`) ??
+        mounts.get(`${fileHint}.${varName}`) ??
+        mounts.get(varName) ??
+        "";
+      const local = localPrefix.get(varName) ?? "";
+      let full = `${mount}${local}${decoPath}`;
+      if (!full.startsWith("/")) full = "/" + full;
+      full = full.replace(/\/{2,}/g, "/");
+      const key = `${method} ${full}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      endpoints.push({
+        id: `endpoint:${c.name}:${method}:${full}`,
+        label: `${method} ${full}`,
+        access: "api-route",
+        method,
+        path: full,
+        file: rel(f),
+        absFile: f,
+        containerId: c.id,
+        proxyTo: [],
+        reads: new Set(),
+        writes: new Set(),
+      });
+    }
+  }
+  return endpoints;
+}
+
+// ── Python: Flask ─────────────────────────────────────────────────────────────
+
+async function flaskEndpoints(c: Container): Promise<Endpoint[]> {
+  const files = await walk(c.root, (_f, n) => n.endsWith(".py"));
+  const endpoints: Endpoint[] = [];
+  const seen = new Set<string>();
+  for (const f of files) {
+    const src = await readCached(f);
+    if (!src) continue;
+    // Blueprint url_prefix per var: `bp = Blueprint("x", __name__, url_prefix="/p")`.
+    const bpPrefix = new Map<string, string>();
+    const bpRe = /([A-Za-z_]\w*)\s*=\s*Blueprint\s*\(([^)]*)\)/g;
+    let b: RegExpExecArray | null;
+    while ((b = bpRe.exec(src))) {
+      const pm = b[2].match(/url_prefix\s*=\s*["']([^"']*)["']/);
+      if (pm) bpPrefix.set(b[1], pm[1]);
+    }
+    const routeRe = /@([A-Za-z_]\w*)\.route\s*\(\s*["']([^"']*)["']([^)]*)\)/g;
+    let m: RegExpExecArray | null;
+    while ((m = routeRe.exec(src))) {
+      const varName = m[1];
+      const path = (bpPrefix.get(varName) ?? "") + m[2];
+      const methodsM = m[3].match(/methods\s*=\s*\[([^\]]*)\]/);
+      const methods = methodsM
+        ? methodsM[1].split(",").map((s) => s.replace(/["'\s]/g, "").toUpperCase()).filter(Boolean)
+        : ["GET"];
+      for (const method of methods) {
+        let full = path.startsWith("/") ? path : "/" + path;
+        full = full.replace(/\/{2,}/g, "/");
+        const key = `${method} ${full}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        endpoints.push({
+          id: `endpoint:${c.name}:${method}:${full}`,
+          label: `${method} ${full}`,
+          access: "api-route", method, path: full,
+          file: rel(f), absFile: f, containerId: c.id, proxyTo: [],
+          reads: new Set(), writes: new Set(),
+        });
       }
     }
-
-    // Determine whether that inline `.collection` belongs to THIS chain: there
-    // must be no statement terminator between it and the op (ignoring those
-    // inside strings is approximated by a simple scan).
-    let belongsToChain = false;
-    if (lastCollEnd >= 0) {
-      const between = segment.slice(lastCollEnd);
-      belongsToChain = !/[;{}]/.test(between.replace(/\([^)]*\)/g, ""));
-    }
-
-    if (collName && belongsToChain) {
-      (isWrite ? writes : reads).add(collName);
-      continue;
-    }
-
-    // Otherwise, resolve via the receiver variable: `<var>.<op>(`. Capture the
-    // identifier immediately before the op (and any `.doc(...)` in between).
-    const recv = segment.match(/([A-Za-z_$][\w$]*)\s*(?:\.\s*doc\s*\([^)]*\)\s*)*$/);
-    if (recv && bindings.has(recv[1])) {
-      (isWrite ? writes : reads).add(bindings.get(recv[1])!);
-      continue;
-    }
-
-    // Could not attribute this op to a collection — skip (recorded by the caller
-    // only if a whole endpoint resolves to nothing).
   }
-
-  // `batch.set(<ref>.doc(...), ...)` / `batch.delete(<ref>.doc(...))` /
-  // `batch.update(<ref>, ...)` — the operated ref is the first argument, not the
-  // receiver. Resolve those explicitly against the bindings.
-  const batchRe = /\.(set|update|delete|create)\s*\(\s*([A-Za-z_$][\w$]*)\b/g;
-  while ((m = batchRe.exec(body))) {
-    const op = m[1];
-    const argVar = m[2];
-    if (bindings.has(argVar)) writes.add(bindings.get(argVar)!);
-  }
-
-  return { reads, writes };
+  return endpoints;
 }
 
-// Generic SQL / BigQuery table extraction. Best-effort, additive — a repo may
-// have none, but a generic builder shouldn't ignore other stacks.
-//
-// CRITICAL: we mine table names ONLY from genuine string/template literals (a
-// real SQL query always lives in one). Scanning raw source would match prose in
-// comments — e.g. the comment `// Update the note` would yield a bogus table
-// "the" via `UPDATE the`. Restricting to string literals eliminates that whole
-// class of false positive while still catching real SQL.
-const BQ_FQN = /(?:\$?\{[^}]+\}|[A-Za-z][\w-]*)\.(?:\$?\{[^}]+\}|[A-Za-z_][\w-]*)\.([A-Za-z_][A-Za-z0-9_]*)/g;
-// Table-clause patterns anchored on FULL statement shapes. Matching the verb
-// alone is not enough: an error string like "Failed to update note:" contains
-// the word "update" but is not SQL. Each pattern requires the structural
-// keyword that always accompanies a real table reference:
-//   FROM <t> / JOIN <t> / INTO <t> / DELETE FROM <t> / UPDATE <t> SET / TABLE <t>
-const SQL_TABLE_CLAUSES: Array<{ re: RegExp; write: boolean }> = [
-  { re: /\bFROM\s+`?([A-Za-z_][\w.]*)`?/gi, write: false },
-  { re: /\bJOIN\s+`?([A-Za-z_][\w.]*)`?/gi, write: false },
-  { re: /\bINSERT\s+INTO\s+`?([A-Za-z_][\w.]*)`?/gi, write: true },
-  { re: /\bMERGE\s+INTO\s+`?([A-Za-z_][\w.]*)`?/gi, write: true },
-  { re: /\bUPDATE\s+`?([A-Za-z_][\w.]*)`?\s+SET\b/gi, write: true },
-  { re: /\b(?:CREATE|REPLACE|TRUNCATE)\s+(?:OR\s+REPLACE\s+)?TABLE\s+`?([A-Za-z_][\w.]*)`?/gi, write: true },
+// ── JS/TS: Express / Fastify / Hono ───────────────────────────────────────────
+
+async function expressEndpoints(c: Container): Promise<Endpoint[]> {
+  const files = await walk(c.root, (_f, n) => /\.(tsx?|jsx?|mjs|cjs)$/.test(n));
+  const endpoints: Endpoint[] = [];
+  const seen = new Set<string>();
+  const methodAlt = HTTP_METHODS.join("|");
+  for (const f of files) {
+    const src = await readCached(f);
+    if (!src) continue;
+    const re = new RegExp(`\\b([A-Za-z_$][\\w$]*)\\.(${methodAlt})\\s*\\(\\s*["'\`]([^"'\`]+)["'\`]`, "g");
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(src))) {
+      const recv = m[1];
+      if (!/^(app|router|api|server|r|route|fastify)$/i.test(recv)) continue;
+      const method = m[2].toUpperCase();
+      let full = m[3].startsWith("/") ? m[3] : "/" + m[3];
+      full = full.replace(/\/{2,}/g, "/");
+      const key = `${method} ${full}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      endpoints.push({
+        id: `endpoint:${c.name}:${method}:${full}`,
+        label: `${method} ${full}`,
+        access: "api-route", method, path: full,
+        file: rel(f), absFile: f, containerId: c.id, proxyTo: [],
+        reads: new Set(), writes: new Set(),
+      });
+    }
+  }
+  return endpoints;
+}
+
+// ── JS/TS: NestJS ─────────────────────────────────────────────────────────────
+
+async function nestEndpoints(c: Container): Promise<Endpoint[]> {
+  const files = await walk(c.root, (_f, n) => /\.ts$/.test(n));
+  const endpoints: Endpoint[] = [];
+  const seen = new Set<string>();
+  for (const f of files) {
+    const src = await readCached(f);
+    if (!src || !/@Controller\s*\(/.test(src)) continue;
+    const ctrl = src.match(/@Controller\s*\(\s*["'`]?([^"'`)]*)["'`]?\s*\)/);
+    const prefix = ctrl && ctrl[1] ? (ctrl[1].startsWith("/") ? ctrl[1] : "/" + ctrl[1]) : "";
+    const re = /@(Get|Post|Put|Patch|Delete|Head|Options)\s*\(\s*["'`]?([^"'`)]*)["'`]?\s*\)/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(src))) {
+      const method = m[1].toUpperCase();
+      const sub = m[2] ? (m[2].startsWith("/") ? m[2] : "/" + m[2]) : "";
+      let full = (prefix + sub).replace(/\/{2,}/g, "/") || "/";
+      const key = `${method} ${full}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      endpoints.push({
+        id: `endpoint:${c.name}:${method}:${full}`,
+        label: `${method} ${full}`,
+        access: "api-route", method, path: full,
+        file: rel(f), absFile: f, containerId: c.id, proxyTo: [],
+        reads: new Set(), writes: new Set(),
+      });
+    }
+  }
+  return endpoints;
+}
+
+// ── Next.js: server actions ("use server") + route handlers (app/api) ─────────
+
+function declaresUseServer(src: string): boolean {
+  const head = src.split("\n").map((l) => l.trim()).filter((l) => l.length > 0).slice(0, 3);
+  return head.some((l) => /^["']use server["'];?$/.test(l));
+}
+
+function extractExportedAsyncFns(src: string): string[] {
+  const names = new Set<string>();
+  let m: RegExpExecArray | null;
+  const fnDecl = /export\s+async\s+function\s+([A-Za-z_$][\w$]*)\s*\(/g;
+  while ((m = fnDecl.exec(src))) names.add(m[1]);
+  const constArrow = /export\s+const\s+([A-Za-z_$][\w$]*)\s*(?::[^=]+)?=\s*async\b/g;
+  while ((m = constArrow.exec(src))) names.add(m[1]);
+  return [...names];
+}
+
+// Extract the backend path(s) a Next proxy route forwards to, from
+// `${BACKEND_URL}/path` / `${API_URL}/path` template literals or fetch() calls.
+function extractProxyTargets(src: string): string[] {
+  const out = new Set<string>();
+  // `${...URL...}/some/path`  (template-literal proxy — the dominant pattern)
+  const tplRe = /`\$\{[^}]*\}(\/[A-Za-z0-9_./{}\[\]:-]*)/g;
+  let m: RegExpExecArray | null;
+  while ((m = tplRe.exec(src))) {
+    const p = m[1].split("?")[0].replace(/\/$/, "");
+    if (p.length > 1) out.add(p);
+  }
+  return [...out];
+}
+
+async function nextActionAndRouteEndpoints(c: Container): Promise<Endpoint[]> {
+  const endpoints: Endpoint[] = [];
+  const appDir = await findFirstDir(c.root, [["app"], ["src", "app"]]);
+  const srcRoot = (await isDir(join(c.root, "src"))) ? join(c.root, "src") : c.root;
+
+  // Server actions: src/actions/** + any "use server" file (excluding api routes).
+  const actionFiles = new Set<string>();
+  for (const ad of [join(c.root, "src", "actions"), join(c.root, "actions")]) {
+    if (await isDir(ad)) for (const f of await walk(ad, (_x, n) => /\.tsx?$/.test(n))) actionFiles.add(f);
+  }
+  const apiPrefix = appDir ? join(appDir, "api") : null;
+  for (const f of await walk(srcRoot, (_x, n) => /\.tsx?$/.test(n))) {
+    if (actionFiles.has(f)) continue;
+    if (apiPrefix && f.startsWith(apiPrefix + "/")) continue;
+    if (/^route\.(ts|tsx)$/.test(basename(f))) continue;
+    const src = await readCached(f);
+    if (src && declaresUseServer(src)) actionFiles.add(f);
+  }
+  const actionSeen = new Set<string>();
+  for (const f of actionFiles) {
+    const src = await readCached(f);
+    if (!src) continue;
+    for (const fn of extractExportedAsyncFns(src)) {
+      let id = `endpoint:${c.name}:action:${fn}`;
+      let label = fn;
+      if (actionSeen.has(fn)) { const tag = basename(f).replace(/\.tsx?$/, ""); id = `endpoint:${c.name}:action:${tag}.${fn}`; label = `${tag}.${fn}`; }
+      actionSeen.add(fn);
+      endpoints.push({
+        id, label, access: "server-action", file: rel(f), absFile: f,
+        containerId: c.id, proxyTo: [], reads: new Set(), writes: new Set(),
+      });
+    }
+  }
+
+  // Route handlers: app/api/**/route.ts → api-route endpoints (often proxies).
+  if (apiPrefix && (await isDir(apiPrefix))) {
+    const routeFiles = await walk(apiPrefix, (_f, n) => /^route\.(ts|tsx|js)$/.test(n));
+    for (const f of routeFiles) {
+      const relDir = relative(appDir!, dirname(f));
+      const apiPath = "/" + relDir.split("/").filter((p) => p && !/^\(.+\)$/.test(p)).join("/");
+      const src = (await readCached(f)) ?? "";
+      const methods = (src.match(/export\s+(?:async\s+)?function\s+(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\b/g) || [])
+        .map((s) => s.match(/(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)/)![1]);
+      const method = methods.length ? methods.join("/") : undefined;
+      endpoints.push({
+        id: `endpoint:${c.name}:${apiPath}`,
+        label: apiPath,
+        access: "api-route", method, path: apiPath,
+        file: rel(f), absFile: f, containerId: c.id,
+        proxyTo: extractProxyTargets(src),
+        reads: new Set(), writes: new Set(),
+      });
+    }
+  }
+  return endpoints;
+}
+
+async function detectEndpoints(c: Container): Promise<Endpoint[]> {
+  const fw = c.info?.framework;
+  const lang = c.info?.lang;
+  const out: Endpoint[] = [];
+  if (lang === "python") {
+    if (fw === "flask") out.push(...(await flaskEndpoints(c)));
+    else out.push(...(await fastapiEndpoints(c))); // default python HTTP detector
+  } else if (lang === "node") {
+    if (fw === "next" || fw === "remix") out.push(...(await nextActionAndRouteEndpoints(c)));
+    else if (fw === "nestjs") out.push(...(await nestEndpoints(c)));
+    else out.push(...(await expressEndpoints(c))); // express/fastify/hono/generic
+  }
+  return out;
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+//  STORE (DATASTORE) DETECTION  — broad engine catalog
+// ══════════════════════════════════════════════════════════════════════════
+
+// db is the colour bucket ("bigquery"|"sql"|"firestore" get dedicated colours;
+// anything else renders as a generic store). engine is the precise label.
+interface StoreEngine {
+  engine: string;
+  db: string;
+  signature: RegExp;
+  minable: boolean; // can we mine concrete table/collection names?
+}
+
+const ENGINES: StoreEngine[] = [
+  { engine: "bigquery", db: "bigquery", signature: /google\.cloud\.bigquery|@google-cloud\/bigquery|\bbigquery\.Client|from\s+google\.cloud\s+import\s+bigquery/i, minable: true },
+  { engine: "firestore", db: "firestore", signature: /firebase[_-]admin|google\.cloud\.firestore|firebase\/firestore|getFirestore|firestore\(\)/i, minable: true },
+  { engine: "postgres", db: "sql", signature: /psycopg2?|asyncpg|sqlalchemy|create_engine|\bpg\b|node-postgres|"pg"|'pg'|postgres(?:ql)?:\/\//i, minable: true },
+  { engine: "mysql", db: "sql", signature: /pymysql|aiomysql|mysql2|mysql:\/\//i, minable: true },
+  { engine: "sqlite", db: "sql", signature: /sqlite3|better-sqlite3|aiosqlite/i, minable: true },
+  { engine: "mongodb", db: "mongodb", signature: /pymongo|mongoose|mongodb(?:\+srv)?:\/\/|from\s+motor/i, minable: false },
+  { engine: "dynamodb", db: "dynamodb", signature: /@aws-sdk\/client-dynamodb|DynamoDBClient|boto3[\s\S]{0,40}dynamodb|\.resource\(\s*["']dynamodb["']\)|\.client\(\s*["']dynamodb["']\)/i, minable: false },
+  { engine: "s3", db: "s3", signature: /@aws-sdk\/client-s3|S3Client|boto3[\s\S]{0,40}["']s3["']|\.client\(\s*["']s3["']\)/i, minable: false },
+  { engine: "cosmos", db: "cosmos", signature: /@azure\/cosmos|azure\.cosmos|CosmosClient/i, minable: false },
+  { engine: "redis", db: "redis", signature: /\bioredis\b|from\s+redis|import\s+redis|redis\.createClient|new\s+Redis\(/i, minable: false },
 ];
-// A literal only qualifies as SQL when it contains a verb AND a structural
-// keyword — i.e. it is shaped like a statement, not just a word.
+
+// ── SQL / BigQuery table mining from string literals ──────────────────────────
+//
+// Precision strategy. SQL written against BigQuery ALWAYS fully-qualifies tables
+// (`project.dataset.table`, interpolation allowed: `{proj}.{ds}.trade_signals`),
+// whereas CTEs and aliases are BARE single tokens (`FROM deduped`, `JOIN t`).
+// So for BigQuery we accept ONLY dotted references and take the last segment —
+// that one rule drops the entire CTE / alias / keyword noise class. Bare table
+// names are mined only for a genuinely bare-table SQL engine (Postgres/MySQL/
+// SQLite) and only when BigQuery is NOT in play, with CTE + keyword + alias
+// filtering on top.
+
 const SQL_STATEMENT = /\b(SELECT|INSERT\s+INTO|UPDATE)\b[\s\S]*\b(FROM|INTO|SET|JOIN)\b|\bDELETE\s+FROM\b|\bMERGE\s+INTO\b|\bCREATE\s+(?:OR\s+REPLACE\s+)?TABLE\b/i;
 
-// Pull out the contents of every string / template literal in a source body.
+// A dotted reference segment: a bare identifier OR a `{…}` / `${…}` interpolation.
+const SEG = String.raw`(?:\$?\{[^}]+\}|\`?[A-Za-z_][\w-]*\`?)`;
+// Table clauses, capturing a DOTTED reference (≥2 segments) → BigQuery table.
+const FQN_CLAUSES: Array<{ re: RegExp; write: boolean }> = [
+  { re: new RegExp(String.raw`\bFROM\s+\`?(${SEG}(?:\.${SEG})+)`, "gi"), write: false },
+  { re: new RegExp(String.raw`\bJOIN\s+\`?(${SEG}(?:\.${SEG})+)`, "gi"), write: false },
+  { re: new RegExp(String.raw`\bINSERT\s+INTO\s+\`?(${SEG}(?:\.${SEG})+)`, "gi"), write: true },
+  { re: new RegExp(String.raw`\bMERGE\s+(?:INTO\s+)?\`?(${SEG}(?:\.${SEG})+)`, "gi"), write: true },
+  { re: new RegExp(String.raw`\bUPDATE\s+\`?(${SEG}(?:\.${SEG})+)`, "gi"), write: true },
+  { re: new RegExp(String.raw`\bDELETE\s+FROM\s+\`?(${SEG}(?:\.${SEG})+)`, "gi"), write: true },
+  { re: new RegExp(String.raw`\b(?:CREATE|REPLACE|TRUNCATE)\s+(?:OR\s+REPLACE\s+)?TABLE\s+\`?(${SEG}(?:\.${SEG})+)`, "gi"), write: true },
+];
+// Bare table clauses (single identifier) — only used for non-BQ SQL engines.
+const BARE_CLAUSES: Array<{ re: RegExp; write: boolean }> = [
+  { re: /\bFROM\s+([A-Za-z_]\w*)/gi, write: false },
+  { re: /\bJOIN\s+([A-Za-z_]\w*)/gi, write: false },
+  { re: /\bINSERT\s+INTO\s+([A-Za-z_]\w*)/gi, write: true },
+  { re: /\bUPDATE\s+([A-Za-z_]\w*)\s+SET\b/gi, write: true },
+  { re: /\bDELETE\s+FROM\s+([A-Za-z_]\w*)/gi, write: true },
+];
+const SQL_KEYWORDS = new Set([
+  "select", "from", "where", "join", "on", "as", "and", "or", "group", "order", "by",
+  "limit", "offset", "having", "qualify", "partition", "cluster", "over", "with",
+  "union", "all", "distinct", "case", "when", "then", "else", "end", "unnest",
+  "values", "set", "into", "using", "cross", "inner", "left", "right", "outer",
+  "full", "if", "ifnull", "coalesce", "date", "datetime", "timestamp", "json",
+  "null", "true", "false", "exists", "in", "not", "is", "asc", "desc", "lateral",
+  "the", "this", "these", "those", "table", "row", "rows", "between", "like",
+]);
+
+// Identifiers that are dotted like a table ref but never name a user table.
+const NON_TABLE = new Set([
+  "dataframe", "columns", "tables", "partitions", "logger", "log", "dataset",
+  "dataset_id", "table_id", "project", "project_id", "client", "self", "py",
+  "md", "info", "debug", "warning", "error", "live", "staging", "stg", "snap",
+  "tbl", "col", "tmp", "temp", "prod", "dev",
+]);
+
+// Last dotted segment of an FQN reference, cleaned of backticks/interpolation.
+// Returns null for aliases / non-table identifiers (short, keyword, code-ish).
+function lastSegment(ref: string): string | null {
+  if (/information_schema/i.test(ref)) return null; // metadata views, not tables
+  const seg = (ref.split(".").pop() ?? "").trim();
+  if (/^\$?\{.*\}$/.test(seg)) return null; // pure interpolation → dynamic name, unresolvable
+  const cleaned = seg.replace(/[`${}]/g, "").trim();
+  if (!/^[A-Za-z]\w*$/.test(cleaned)) return null; // must start with a letter (no _private)
+  const lc = cleaned.toLowerCase();
+  if (cleaned.length < 3) return null; // 1–2 char tokens are table aliases
+  if (SQL_KEYWORDS.has(lc) || NON_TABLE.has(lc)) return null;
+  return cleaned;
+}
+
+// A real fully-qualified table reference carries interpolation (built from a
+// dataset var) or has ≥3 segments — distinguishing `{ds}.timeseries` /
+// `proj.ds.table` from a 2-part Python attribute string like `pd.DataFrame`.
+function looksLikeFqn(ref: string): boolean {
+  return /[{}]/.test(ref) || (ref.match(/\./g) || []).length >= 2;
+}
+
+// CTE names declared in a query (`WITH x AS (`, `, y AS (`) — excluded from tables.
+function cteNames(sql: string): Set<string> {
+  const out = new Set<string>();
+  const re = /(?:\bWITH\s+|,\s*)([A-Za-z_]\w*)\s+AS\s*\(/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(sql))) out.add(m[1].toLowerCase());
+  return out;
+}
+
 function stringLiterals(body: string): string[] {
   const out: string[] = [];
   let i = 0;
@@ -787,11 +990,7 @@ function stringLiterals(body: string): string[] {
       let buf = "";
       while (j < body.length) {
         const d = body[j];
-        if (d === "\\") {
-          buf += body[j + 1] ?? "";
-          j += 2;
-          continue;
-        }
+        if (d === "\\") { buf += body[j + 1] ?? ""; j += 2; continue; }
         if (d === quote) break;
         buf += d;
         j++;
@@ -800,111 +999,194 @@ function stringLiterals(body: string): string[] {
       i = j + 1;
       continue;
     }
-    // Skip line + block comments so a stray quote in a comment can't open a
-    // bogus string region.
-    if (c === "/" && body[i + 1] === "/") {
-      const nl = body.indexOf("\n", i);
-      i = nl < 0 ? body.length : nl;
-      continue;
-    }
-    if (c === "/" && body[i + 1] === "*") {
-      const end = body.indexOf("*/", i);
-      i = end < 0 ? body.length : end + 2;
-      continue;
-    }
+    if (c === "#") { const nl = body.indexOf("\n", i); i = nl < 0 ? body.length : nl; continue; }
+    if (c === "/" && body[i + 1] === "/") { const nl = body.indexOf("\n", i); i = nl < 0 ? body.length : nl; continue; }
+    if (c === "/" && body[i + 1] === "*") { const end = body.indexOf("*/", i); i = end < 0 ? body.length : end + 2; continue; }
     i++;
   }
   return out;
 }
 
-function extractSqlBqStores(body: string): {
-  tables: Set<string>;
-  isWrite: boolean;
-  db: "sql" | "bigquery";
-} {
-  const tables = new Set<string>();
-  let db: "sql" | "bigquery" = "sql";
-  let isWrite = false;
-
+interface SqlStores {
+  bq: Set<string>; bqWrites: Set<string>;
+  bare: Set<string>; bareWrites: Set<string>;
+}
+function extractSqlBqStores(body: string, opts: { bqPresent: boolean; bareSql: boolean }): SqlStores {
+  const bq = new Set<string>(), bqWrites = new Set<string>();
+  const bare = new Set<string>(), bareWrites = new Set<string>();
   for (const raw of stringLiterals(body)) {
-    // Drop `${...}` template interpolations: their contents are JS expressions
-    // (e.g. `${snapshot.docs.length}`), not SQL or table identifiers, and a
-    // dotted JS member access like `snapshot.docs.length` would otherwise look
-    // like a 3-part BigQuery FQN.
-    const lit = raw.replace(/\$\{[^}]*\}/g, " ");
+    // Whole literal is itself a table reference (an id handed to a BQ client)?
+    const trimmed = raw.trim();
+    const wholeIsFqn =
+      new RegExp(String.raw`^${SEG}(?:\.${SEG}){1,2}$`).test(trimmed) &&
+      /[A-Za-z]/.test(trimmed) && looksLikeFqn(trimmed);
+    const isSql = SQL_STATEMENT.test(raw);
+    if (!isSql && !wholeIsFqn) continue;
 
-    // A BigQuery fully-qualified `project.dataset.table` reference (3 dotted
-    // segments). We only trust it when the literal is SQL-shaped OR the whole
-    // trimmed literal IS the dotted id (a table id passed to a BQ client).
-    const wholeIsFqn = /^[A-Za-z_][\w-]*\.[A-Za-z_][\w-]*\.[A-Za-z_][\w-]*$/.test(lit.trim());
-    let m: RegExpExecArray | null;
-    if (wholeIsFqn || SQL_STATEMENT.test(lit)) {
-      BQ_FQN.lastIndex = 0;
-      while ((m = BQ_FQN.exec(lit))) {
-        tables.add(m[1]);
-        db = "bigquery";
+    // Dotted (BigQuery) references — the reliable, low-noise signal.
+    if (opts.bqPresent) {
+      if (wholeIsFqn) {
+        const t = lastSegment(trimmed);
+        if (t) bq.add(t);
+      }
+      let m: RegExpExecArray | null;
+      for (const { re, write } of FQN_CLAUSES) {
+        re.lastIndex = 0;
+        while ((m = re.exec(raw))) {
+          if (!looksLikeFqn(m[1])) continue;
+          const t = lastSegment(m[1]);
+          if (!t) continue;
+          bq.add(t);
+          if (write) bqWrites.add(t);
+        }
       }
     }
-    // Bare table names — only inside a literal shaped like a real SQL statement.
-    if (!SQL_STATEMENT.test(lit)) continue;
-    for (const { re, write } of SQL_TABLE_CLAUSES) {
-      re.lastIndex = 0;
-      while ((m = re.exec(lit))) {
-        // The last dotted segment is the table name.
-        const t = m[1].split(".").pop()!;
-        if (/^(SELECT|WHERE|VALUES|SET|AS|ON|DUAL)$/i.test(t)) continue;
-        tables.add(t);
-        if (write) isWrite = true;
+
+    // Bare table names — only for a real bare-table SQL engine, and only when
+    // BigQuery isn't the dialect in play (else every CTE looks like a table).
+    if (isSql && opts.bareSql && !opts.bqPresent) {
+      const ctes = cteNames(raw);
+      let m: RegExpExecArray | null;
+      for (const { re, write } of BARE_CLAUSES) {
+        re.lastIndex = 0;
+        while ((m = re.exec(raw))) {
+          const t = m[1];
+          const lt = t.toLowerCase();
+          if (t.length < 3 || SQL_KEYWORDS.has(lt) || ctes.has(lt)) continue;
+          bare.add(t);
+          if (write) bareWrites.add(t);
+        }
       }
     }
   }
-
-  return { tables, isWrite, db };
+  return { bq, bqWrites, bare, bareWrites };
 }
 
-// ── Frontend route reachability (for fetch edges) ────────────────────────────
+// ── Firestore collection mining (`.collection('x')`) ──────────────────────────
 
-// Resolve a local import spec (`@/...` alias, or relative `./` `../`) to an
-// absolute file path under the repo. `@/` maps to `src/` (the standard Next.js
-// alias; e.g. a tsconfig `"@/*": ["./src/*"]` path mapping).
-async function resolveLocalImport(
-  fromFile: string,
-  spec: string,
-): Promise<string | null> {
+const FS_WRITE_OPS = ["set", "add", "update", "create", "delete"];
+function extractFirestoreCollections(body: string): { reads: Set<string>; writes: Set<string> } {
+  const reads = new Set<string>();
+  const writes = new Set<string>();
+  // Resolve simple module-scope constants: NAME = 'collection'.
+  const consts = new Map<string, string>();
+  const cre = /(?:const|let|var)?\s*([A-Z][A-Z0-9_]*)\s*=\s*["'`]([A-Za-z0-9_./-]+)["'`]/g;
+  let cm: RegExpExecArray | null;
+  while ((cm = cre.exec(body))) consts.set(cm[1], cm[2]);
+
+  // Admin-SDK / namespaced form: `db.collection('x')` / `.collectionGroup('x')`.
+  // Modular Firebase v9 form: `collection(db, 'x')` / `collectionGroup(db, 'x')`.
+  const collRe = /\.collection(?:Group)?\s*\(\s*([^),]*?)\s*[),]|(?<![.\w])collection(?:Group)?\s*\(\s*[A-Za-z_$][\w$]*\s*,\s*([^),]*?)\s*[),]/g;
+  let m: RegExpExecArray | null;
+  while ((m = collRe.exec(body))) {
+    const arg = (m[1] ?? m[2] ?? "").trim();
+    const lit = arg.match(/^["'`]([A-Za-z0-9_./-]+)["'`]$/);
+    const name = lit ? lit[1] : consts.get(arg) ?? null;
+    if (!name) continue;
+    if (/^(firestore|collection|doc|db|database)$/i.test(name)) continue; // not a real collection name
+    // Look just past the collection chain for a terminal op to guess read/write.
+    const tail = body.slice(m.index + m[0].length, m.index + m[0].length + 200);
+    const isWrite = FS_WRITE_OPS.some((op) => new RegExp(`\\.${op}\\s*\\(`).test(tail))
+      || /\b(setDoc|addDoc|updateDoc|deleteDoc)\s*\(/.test(tail);
+    (isWrite ? writes : reads).add(name);
+  }
+  return { reads, writes };
+}
+
+interface StoreHit { engine: string; db: string; name: string; write: boolean }
+
+// Scan a set of source files; return the concrete stores they touch.
+async function minesStores(files: string[]): Promise<StoreHit[]> {
+  const hits = new Map<string, StoreHit>();
+  const put = (engine: string, db: string, name: string, write: boolean) => {
+    const k = `${db}:${name}`;
+    const ex = hits.get(k);
+    if (ex) { if (write) ex.write = true; }
+    else hits.set(k, { engine, db, name, write });
+  };
+
+  // Which engines are present at all (by signature) across these files.
+  const presentEngines = new Set<string>();
+  let combined = "";
+  for (const f of files) combined += (await readCached(f)) ?? "";
+  for (const e of ENGINES) if (e.signature.test(combined)) presentEngines.add(e.engine);
+
+  const bqPresent = presentEngines.has("bigquery");
+  const bareSqlEngine = ["postgres", "mysql", "sqlite"].find((e) => presentEngines.has(e));
+  for (const f of files) {
+    const src = await readCached(f);
+    if (!src) continue;
+    // SQL / BigQuery tables.
+    if (bqPresent || bareSqlEngine) {
+      const { bq, bqWrites, bare, bareWrites } = extractSqlBqStores(src, { bqPresent, bareSql: !!bareSqlEngine });
+      for (const t of bq) put("bigquery", "bigquery", t, bqWrites.has(t));
+      for (const t of bare) put(bareSqlEngine ?? "postgres", "sql", t, bareWrites.has(t));
+    }
+    // Firestore collections.
+    if (presentEngines.has("firestore")) {
+      const { reads, writes } = extractFirestoreCollections(src);
+      for (const n of reads) put("firestore", "firestore", n, false);
+      for (const n of writes) put("firestore", "firestore", n, true);
+    }
+  }
+
+  // Engines that are present but whose concrete names we can't resolve → one
+  // generic node. We emit this for non-minable engines (Mongo/Dynamo/S3/Cosmos/
+  // Redis) always, and for a bare-SQL engine whose table mining was suppressed
+  // by a BigQuery dialect in the same container. We do NOT emit a generic node
+  // for BigQuery/Firestore (their concrete names are mined elsewhere).
+  const GENERIC_LABEL: Record<string, string> = {
+    s3: "S3", redis: "Redis", dynamodb: "DynamoDB", cosmos: "Cosmos DB",
+    mongodb: "MongoDB", postgres: "Postgres", mysql: "MySQL", sqlite: "SQLite",
+  };
+  for (const e of ENGINES) {
+    if (!presentEngines.has(e.engine)) continue;
+    if ([...hits.values()].some((h) => h.engine === e.engine)) continue; // already have concrete names
+    const suppressedSql = e.db === "sql" && bqPresent; // its tables weren't mined (BQ dialect)
+    if (e.minable && !suppressedSql) continue; // don't emit generic bigquery/firestore
+    const label = GENERIC_LABEL[e.engine] ?? e.engine;
+    if (!hits.has(`${e.db}:${label}`)) put(e.engine, e.db, label, false);
+  }
+  return [...hits.values()];
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+//  FRONTEND REACHABILITY (for fetch edges)
+// ══════════════════════════════════════════════════════════════════════════
+
+async function resolveLocalImport(fromFile: string, spec: string, aliasRoots: string[]): Promise<string | null> {
   let base: string;
   if (spec.startsWith("@/")) {
-    base = join(REPO_ROOT, "src", spec.slice(2));
+    // Try each alias root (frontend root, then root/src).
+    for (const ar of aliasRoots) {
+      const cand = join(ar, spec.slice(2));
+      const r = await resolveWithExt(cand);
+      if (r) return r;
+    }
+    return null;
   } else if (spec.startsWith("./") || spec.startsWith("../")) {
     base = join(dirname(fromFile), spec);
   } else {
-    return null; // bare package import — not local
+    return null;
   }
-  const candidates = [
-    base + ".tsx",
-    base + ".ts",
-    base + ".jsx",
-    base + ".js",
-    join(base, "index.tsx"),
-    join(base, "index.ts"),
-    join(base, "index.jsx"),
-    join(base, "index.js"),
-  ];
-  // If the spec already has an extension and resolves, accept it.
+  return resolveWithExt(base);
+}
+
+async function resolveWithExt(base: string): Promise<string | null> {
   if (/\.[tj]sx?$/.test(base) && (await exists(base))) return base;
-  for (const c of candidates) {
-    if (await exists(c)) return c;
-  }
+  const candidates = [
+    base + ".tsx", base + ".ts", base + ".jsx", base + ".js",
+    join(base, "index.tsx"), join(base, "index.ts"), join(base, "index.jsx"), join(base, "index.js"),
+  ];
+  for (const c of candidates) if (await exists(c)) return c;
   return null;
 }
 
-// All local import specs in a source file — static (`import ... from '...'`,
-// `export ... from '...'`) AND dynamic (`import('...')`). Returns specs that
-// look local (`@/` or relative).
 function localImportSpecs(src: string): string[] {
   const specs: string[] = [];
   const res = [
     /(?:import|export)\b[^'"`]*?\bfrom\s*["']([^"']+)["']/g,
-    /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g, // dynamic import()
+    /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g,
     /\brequire\(\s*["']([^"']+)["']\s*\)/g,
   ];
   for (const re of res) {
@@ -917,14 +1199,7 @@ function localImportSpecs(src: string): string[] {
   return specs;
 }
 
-// Collect the set of files reachable from a page by following LOCAL imports
-// (components / hooks / lib / actions), bounded to MAX_REACHABLE_DEPTH. Follows
-// ALL local imports (not just direct page imports / a hard-coded prefix list)
-// so it works on any directory layout.
-async function collectReachable(
-  pageFile: string,
-  cache: Map<string, string[]>,
-): Promise<string[]> {
+async function collectReachable(pageFile: string, aliasRoots: string[], cache: Map<string, string[]>): Promise<string[]> {
   const seen = new Set<string>([pageFile]);
   let frontier = [pageFile];
   for (let depth = 0; depth < MAX_REACHABLE_DEPTH && frontier.length; depth++) {
@@ -932,16 +1207,13 @@ async function collectReachable(
     for (const f of frontier) {
       let specs = cache.get(f);
       if (!specs) {
-        const src = await readSafe(f);
+        const src = await readCached(f);
         specs = src ? localImportSpecs(src) : [];
         cache.set(f, specs);
       }
       for (const spec of specs) {
-        const resolved = await resolveLocalImport(f, spec);
-        if (resolved && !seen.has(resolved)) {
-          seen.add(resolved);
-          next.push(resolved);
-        }
+        const resolved = await resolveLocalImport(f, spec, aliasRoots);
+        if (resolved && !seen.has(resolved)) { seen.add(resolved); next.push(resolved); }
       }
     }
     frontier = next;
@@ -949,317 +1221,218 @@ async function collectReachable(
   return [...seen];
 }
 
-// In one source file, find which server-action endpoints are invoked, and
-// whether each invocation is `cached` (sits inside a TanStack Query hook call).
-//
-// We match call sites of known action function names. A call site is `cached`
-// when it falls within the matched-brace span of a `useQuery(`/`useSuspenseQuery(`/
-// `useInfiniteQuery(` call — this captures both the in-component hook usage and
-// the hook-module pattern (`useCampaigns` wraps `getCampaigns(token)` inside
-// `useQuery({ queryFn: ... })`).
-const CACHE_HOOK_RE = /\b(useQuery|useSuspenseQuery|useInfiniteQuery)\s*\(/g;
-
-function findActionCalls(
-  src: string,
-  actionNames: Set<string>,
-): Map<string, boolean> {
-  // action name → cached?  (true wins over false on collision)
-  const hits = new Map<string, boolean>();
-
-  // Compute cached spans (regions inside a TanStack hook call).
-  const cacheSpans: Array<[number, number]> = [];
-  CACHE_HOOK_RE.lastIndex = 0;
-  let h: RegExpExecArray | null;
-  while ((h = CACHE_HOOK_RE.exec(src))) {
-    const open = h.index + h[0].length - 1; // points at "("
-    const close = matchCloser(src, open, "(", ")");
-    if (close > open) cacheSpans.push([open, close]);
+// Mine the API path strings a page calls. We take URL-path string literals from
+// the page's reachable files and match them against the known endpoint index.
+function apiPathLiterals(src: string): string[] {
+  const out: string[] = [];
+  // String literals that look like a URL path: start "/", have a path-ish body.
+  const re = /["'`](\/[A-Za-z0-9_][A-Za-z0-9_./${}\[\]:-]*)["'`]/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(src))) {
+    const p = m[1].split("?")[0];
+    if (p.length > 1 && !/\.(png|jpe?g|svg|css|js|ico|woff2?|webp|gif)$/i.test(p)) out.push(p);
   }
-
-  for (const name of actionNames) {
-    // Call site: `name(` not preceded by an identifier char or a dot (so we
-    // don't match `foo.getCampaigns(` member calls or `xgetCampaigns`).
-    const callRe = new RegExp(`(?:^|[^A-Za-z0-9_$.])${escapeRegex(name)}\\s*\\(`, "g");
-    let m: RegExpExecArray | null;
-    while ((m = callRe.exec(src))) {
-      const pos = m.index;
-      const cached = cacheSpans.some(([s, e]) => pos >= s && pos <= e);
-      const prev = hits.get(name);
-      if (prev === undefined) hits.set(name, cached);
-      else if (cached && !prev) hits.set(name, true);
-    }
-  }
-
-  return hits;
+  // Template-literal fetches: `${base}/path`.
+  const tpl = /`\$\{[^}]*\}(\/[A-Za-z0-9_./${}\[\]:-]+)/g;
+  while ((m = tpl.exec(src))) out.push(m[1].split("?")[0]);
+  return out;
 }
 
-// ── Compose the graph ────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════
+//  COMPOSE THE GRAPH
+// ══════════════════════════════════════════════════════════════════════════
 
 export async function buildDataflowGraph(): Promise<DFGraph> {
+  FILE_CACHE.clear();
   const warnings: { kind: string; detail: string }[] = [];
-  const appDir = await findAppDir();
 
-  // store (table) name → db kind, populated during SQL/BQ extraction so the
-  // node-building pass can tag SQL/BigQuery stores correctly. Firestore stores
-  // default to "firestore" when absent. Per-build local (no cross-call leakage).
-  const sqlStoreDb = new Map<string, "sql" | "bigquery">();
-
-  // ── 1) Containers ──────────────────────────────────────────────────────────
+  // 1) Containers (with source roots + lang/framework).
   const containers = await detectContainers(warnings);
-  // The "primary" container hosts all endpoints in the single-service case.
-  const primaryContainer = containers[0];
 
-  // ── 2) Endpoints — server actions ───────────────────────────────────────────
+  // 2) Endpoints (per container, by framework).
   const endpoints: Endpoint[] = [];
-  const actionFnNames = new Set<string>(); // global set of all action fn names
-  // Map action fn name → endpoint id (for fetch-edge resolution).
-  const actionNameToEndpointId = new Map<string, string>();
+  for (const c of containers) endpoints.push(...(await detectEndpoints(c)));
 
-  const actionFiles = await findServerActionFiles(appDir);
-  for (const file of actionFiles) {
-    const src = await readSafe(file);
-    if (!src) continue;
-    const exported = extractExportedAsyncFns(src);
-    if (exported.length === 0) {
-      warnings.push({
-        kind: "empty-action-file",
-        detail: `${rel(file)} declares no exported async functions`,
-      });
-      continue;
+  // 3) Frontend routes (per node/frontend container).
+  const routes: Route[] = [];
+  const frontendContainers = containers.filter((c) => {
+    const fw = c.info?.framework;
+    return c.info?.lang === "node" && (fw === "next" || fw === "remix" || fw === "vite" || fw === "react" || fw === "vue" || fw === "sveltekit");
+  });
+  for (const c of frontendContainers) routes.push(...(await detectFrontendRoutes(c, warnings)));
+
+  // 4) Store attribution.
+  //    Per-endpoint: scan the endpoint's own file + sibling source files in the
+  //    same dir (captures the router.py + queries.py colocated pattern, and
+  //    inline-handler frameworks). Remaining container stores → container edges.
+  const storeNodes = new Map<string, DFNode>();
+  const ensureStore = (engine: string, db: string, name: string) => {
+    const id = `store:${db}:${name}`;
+    if (!storeNodes.has(id)) {
+      const data: DFNode["data"] = { id, label: name, kind: "store", db };
+      if (engine && engine !== db) data.engine = engine;
+      storeNodes.set(id, { data });
     }
-    const consts = collectionConstants(src);
-    const bodies = sliceFunctionBodies(src);
-    for (const fnName of exported) {
-      const id = `endpoint:${fnName}`;
-      // If two action files export the same name, disambiguate with the file.
-      let finalId = id;
-      let finalName = fnName;
-      if (actionNameToEndpointId.has(fnName)) {
-        const tag = basename(file).replace(/\.tsx?$/, "");
-        finalId = `endpoint:${tag}.${fnName}`;
-        finalName = `${tag}.${fnName}`;
-      }
-      const body = bodies.get(fnName) ?? "";
-      const fs = extractFirestoreStores(body, consts);
-      const sqlbq = extractSqlBqStores(body);
-      // Fold any SQL/BQ tables in (tagged by db downstream via storeDb map).
-      const reads = new Set(fs.reads);
-      const writes = new Set(fs.writes);
-      for (const t of sqlbq.tables) (sqlbq.isWrite ? writes : reads).add(t);
-
-      endpoints.push({
-        id: finalId,
-        name: finalName,
-        access: "server-action",
-        file: rel(file),
-        absFile: file,
-        fnName,
-        reads,
-        writes,
-      });
-      actionFnNames.add(fnName);
-      if (!actionNameToEndpointId.has(fnName)) actionNameToEndpointId.set(fnName, finalId);
-      // Record the db kind for any SQL/BQ tables touched.
-      for (const t of sqlbq.tables) sqlStoreDb.set(t, sqlbq.db);
-    }
-  }
-
-  // ── 3) Endpoints — API routes ───────────────────────────────────────────────
-  if (appDir) {
-    const apiDir = join(appDir, "api");
-    if (await exists(apiDir)) {
-      const routeFiles = await walk(
-        apiDir,
-        (_full, n) => n === "route.ts" || n === "route.tsx",
-      );
-      for (const file of routeFiles) {
-        const relDir = relative(appDir, dirname(file));
-        const apiPath = apiPathFromRelDir(relDir);
-        const src = await readSafe(file);
-        const consts = src ? collectionConstants(src) : new Map<string, string>();
-        // The whole route handler file body is the attribution surface (an SSE
-        // route's onSnapshot lives inside GET, but module-level helpers may hold
-        // the chain too — scanning the whole file is the safe generic choice).
-        const fs = src ? extractFirestoreStores(src, consts) : { reads: new Set<string>(), writes: new Set<string>() };
-        const sqlbq = src ? extractSqlBqStores(src) : { tables: new Set<string>(), isWrite: false, db: "sql" as const };
-        const reads = new Set(fs.reads);
-        const writes = new Set(fs.writes);
-        for (const t of sqlbq.tables) {
-          (sqlbq.isWrite ? writes : reads).add(t);
-          sqlStoreDb.set(t, sqlbq.db);
-        }
-        endpoints.push({
-          id: `endpoint:${apiPath}`,
-          name: apiPath,
-          access: "api-route",
-          file: rel(file),
-          absFile: file,
-          reads,
-          writes,
-        });
-      }
-    }
-  }
-
-  if (endpoints.length === 0) {
-    warnings.push({
-      kind: "no-endpoints",
-      detail: "No server actions or API routes detected (no src/actions, no 'use server' files, no app/api/**/route.ts)",
-    });
-  }
-
-  // ── 4) Frontend routes + fetch edges ────────────────────────────────────────
-  const routes: Array<{
-    id: string;
-    path: string;
-    file: string;
-    cached: boolean;
-    // endpoint id → cached?
-    fetches: Map<string, boolean>;
-  }> = [];
-
-  if (!appDir) {
-    warnings.push({
-      kind: "no-frontend",
-      detail: "No Next.js app directory (src/app or app) found — frontend layer is empty",
-    });
-  } else {
-    const pageFiles = await walk(appDir, (_full, n) => n === "page.tsx" || n === "page.jsx");
-    const importCache = new Map<string, string[]>();
-    for (const pageFile of pageFiles) {
-      const relDir = relative(appDir, dirname(pageFile));
-      const path = routePathFromRelDir(relDir);
-      const reachable = await collectReachable(pageFile, importCache);
-
-      // Across all reachable files, find action invocations + cached-ness.
-      const fetches = new Map<string, boolean>(); // endpoint id → cached
-      for (const f of reachable) {
-        const src = await readSafe(f);
-        if (!src) continue;
-        const calls = findActionCalls(src, actionFnNames);
-        for (const [fnName, cached] of calls) {
-          const epId = actionNameToEndpointId.get(fnName);
-          if (!epId) continue; // shouldn't happen — every action name maps
-          const prev = fetches.get(epId);
-          if (prev === undefined) fetches.set(epId, cached);
-          else if (cached && !prev) fetches.set(epId, true);
-        }
-      }
-
-      const cached = [...fetches.values()].some(Boolean);
-      routes.push({
-        id: `route:${path}`,
-        path,
-        file: rel(pageFile),
-        cached,
-        fetches,
-      });
-    }
-  }
-
-  // ── 5) Build flat node/edge lists ───────────────────────────────────────────
-  const nodes: DFNode[] = [];
-  const edges: DFEdge[] = [];
-  const nodeIds = new Set<string>();
-  const addNode = (n: DFNode) => {
-    if (!nodeIds.has(n.data.id)) {
-      nodes.push(n);
-      nodeIds.add(n.data.id);
-    }
-  };
-  let edgeIdx = 0;
-  const addEdge = (
-    source: string,
-    target: string,
-    kind: EdgeKind,
-    cached?: boolean,
-  ) => {
-    const data: DFEdge["data"] = { id: `e${edgeIdx++}`, source, target, kind };
-    if (cached !== undefined) data.cached = cached;
-    edges.push({ data });
+    return id;
   };
 
-  // 5a) Containers.
+  // Edges accumulator.
+  interface RawEdge { source: string; target: string; kind: EdgeKind; cached?: boolean }
+  const rawEdges: RawEdge[] = [];
+
+  // Cache directory listings of source siblings.
+  const dirFilesCache = new Map<string, string[]>();
+  const siblingSources = async (absFile: string): Promise<string[]> => {
+    const d = dirname(absFile);
+    if (dirFilesCache.has(d)) return dirFilesCache.get(d)!;
+    let files: string[] = [];
+    try {
+      const entries = await readdir(d);
+      for (const n of entries) {
+        if (SRC_EXT.test(n)) files.push(join(d, n));
+      }
+    } catch { /* ignore */ }
+    dirFilesCache.set(d, files);
+    return files;
+  };
+
+  const containerStoreFiles = new Map<string, string[]>(); // container id → all source files
+  const containerAttributed = new Map<string, Set<string>>(); // container id → store ids already on an endpoint
+
+  for (const ep of endpoints) {
+    // Stores resolvable from the endpoint's file + same-dir siblings.
+    const scanFiles = ep.access === "server-action"
+      ? [ep.absFile]
+      : await siblingSources(ep.absFile);
+    const hits = await minesStores(scanFiles);
+    for (const h of hits) {
+      const sid = ensureStore(h.engine, h.db, h.name);
+      rawEdges.push({ source: ep.id, target: sid, kind: h.write ? "writes" : "reads" });
+      if (!containerAttributed.has(ep.containerId)) containerAttributed.set(ep.containerId, new Set());
+      containerAttributed.get(ep.containerId)!.add(sid);
+    }
+  }
+
+  // Container-level stores not already attributed to an endpoint.
   for (const c of containers) {
-    addNode({
-      data: {
-        id: c.id,
-        label: c.name,
-        kind: "container",
-        ...(c.platform ? { platform: c.platform } : {}),
-        ...(c.file ? { file: c.file } : {}),
-      },
-    });
+    let files = containerStoreFiles.get(c.id);
+    if (!files) {
+      files = await walk(c.root, (_f, n) => SRC_EXT.test(n));
+      containerStoreFiles.set(c.id, files);
+    }
+    const hits = await minesStores(files);
+    const attributed = containerAttributed.get(c.id) ?? new Set<string>();
+    for (const h of hits) {
+      const sid = `store:${h.db}:${h.name}`;
+      if (attributed.has(sid)) continue; // already shown via a specific endpoint
+      ensureStore(h.engine, h.db, h.name);
+      rawEdges.push({ source: c.id, target: sid, kind: h.write ? "writes" : "reads" });
+    }
   }
 
-  // 5b) Endpoints + hosts edges + reads/writes edges + store nodes.
+  // 5) Fetch edges: build a path index, then wire route → proxy → backend.
+  const backendEndpoints = endpoints.filter((e) => e.access === "api-route" && !frontendContainers.some((fc) => fc.id === e.containerId));
+  const proxyEndpoints = endpoints.filter((e) => frontendContainers.some((fc) => fc.id === e.containerId) && e.access === "api-route");
+
+  const backendByPath = new Map<string, string[]>(); // normPath → endpoint ids
+  for (const e of backendEndpoints) {
+    if (!e.path) continue;
+    const k = normPath(e.path);
+    (backendByPath.get(k) ?? backendByPath.set(k, []).get(k)!).push(e.id);
+  }
+  const proxyByPath = new Map<string, string>(); // normPath(apiPath) → proxy id
+  for (const e of proxyEndpoints) if (e.path) proxyByPath.set(normPath(e.path), e.id);
+
+  // proxy → backend (parsed from `${BACKEND_URL}/path` targets).
+  for (const e of proxyEndpoints) {
+    for (const target of e.proxyTo) {
+      const ids = backendByPath.get(normPath(target));
+      if (ids) for (const id of ids) rawEdges.push({ source: e.id, target: id, kind: "fetch" });
+    }
+  }
+
+  // route → (proxy | backend), matched from API path literals in reachable files.
+  for (const c of frontendContainers) {
+    const aliasRoots = [c.root, join(c.root, "src")];
+    const importCache = new Map<string, string[]>();
+    const cRoutes = routes.filter((r) => r.containerId === c.id);
+    for (const r of cRoutes) {
+      const pageAbs = join(REPO_ROOT, r.file);
+      const reachable = await collectReachable(pageAbs, aliasRoots, importCache);
+      const matched = new Set<string>();
+      let cached = false;
+      for (const f of reachable) {
+        const src = await readCached(f);
+        if (!src) continue;
+        if (/\buseQuery|useSuspenseQuery|useInfiniteQuery|useMutation\b/.test(src)) cached = true;
+        for (const lit of apiPathLiterals(src)) {
+          const np = normPath(lit);
+          // Prefer a proxy endpoint; else strip a leading /api and hit the backend.
+          if (proxyByPath.has(np)) { matched.add(proxyByPath.get(np)!); continue; }
+          const stripped = np.replace(/^\/api(?=\/)/, "") || "/";
+          const beIds = backendByPath.get(np) ?? backendByPath.get(stripped);
+          if (beIds) for (const id of beIds) matched.add(id);
+        }
+      }
+      r.cached = cached && matched.size > 0;
+      for (const epId of matched) rawEdges.push({ source: r.id, target: epId, kind: "fetch", cached: r.cached });
+    }
+  }
+
+  // 6) Materialize nodes + edges (flat, deduped).
+  const nodes: DFNode[] = [];
+  const nodeIds = new Set<string>();
+  const addNode = (n: DFNode) => { if (!nodeIds.has(n.data.id)) { nodes.push(n); nodeIds.add(n.data.id); } };
+
+  for (const c of containers) {
+    addNode({ data: {
+      id: c.id, label: c.name, kind: "container",
+      ...(c.platform ? { platform: c.platform } : {}),
+      ...(c.info?.lang ? { lang: c.info.lang } : {}),
+      ...(c.info?.framework ? { framework: c.info.framework } : {}),
+      ...(c.file ? { file: c.file } : {}),
+    } });
+  }
   for (const ep of endpoints) {
-    const containerId = primaryContainer ? primaryContainer.id : undefined;
-    addNode({
-      data: {
-        id: ep.id,
-        label: ep.name,
-        kind: "endpoint",
-        access: ep.access,
-        file: ep.file,
-        ...(containerId ? { container: containerId } : {}),
-      },
-    });
-    if (containerId) addEdge(containerId, ep.id, "hosts");
-
-    // Store nodes + reads/writes edges.
-    for (const store of ep.reads) {
-      const db = sqlStoreDb.get(store) ?? "firestore";
-      const sid = `store:${db}:${store}`;
-      addNode({ data: { id: sid, label: store, kind: "store", db } });
-      addEdge(ep.id, sid, "reads");
-    }
-    for (const store of ep.writes) {
-      const db = sqlStoreDb.get(store) ?? "firestore";
-      const sid = `store:${db}:${store}`;
-      addNode({ data: { id: sid, label: store, kind: "store", db } });
-      addEdge(ep.id, sid, "writes");
-    }
+    addNode({ data: {
+      id: ep.id, label: ep.label, kind: "endpoint", access: ep.access,
+      ...(ep.method ? { method: ep.method } : {}),
+      file: ep.file, container: ep.containerId,
+    } });
+    rawEdges.push({ source: ep.containerId, target: ep.id, kind: "hosts" });
   }
-
-  // 5c) Routes + fetch edges.
+  for (const s of storeNodes.values()) addNode(s);
   for (const r of routes) {
-    addNode({
-      data: {
-        id: r.id,
-        label: r.cached ? `⚡ ${r.path}` : r.path,
-        kind: "fe-route",
-        cached: r.cached,
-        file: r.file,
-      },
-    });
-    for (const [epId, cached] of r.fetches) {
-      // epId is guaranteed to be an endpoint node (built above).
-      addEdge(r.id, epId, "fetch", cached);
-    }
+    addNode({ data: { id: r.id, label: r.cached ? `⚡ ${r.path}` : r.path, kind: "fe-route", cached: r.cached, file: r.file } });
+    if (r.containerId) rawEdges.push({ source: r.containerId, target: r.id, kind: "hosts" });
   }
 
-  // ── 6) Sanity warnings — never silently drop, but every edge must be real. ──
-  // (All edges above reference ids we addNode'd, so by construction there are no
-  // dangling edges. We still record orphans for visibility.)
-  const reachedEndpoints = new Set<string>();
-  for (const r of routes) for (const epId of r.fetches.keys()) reachedEndpoints.add(epId);
-  for (const ep of endpoints) {
-    if (ep.access === "server-action" && !reachedEndpoints.has(ep.id)) {
-      warnings.push({
-        kind: "orphan-endpoint",
-        detail: `${ep.name} (${ep.file}) — no frontend route reaches this server action`,
-      });
-    }
-    if (ep.reads.size === 0 && ep.writes.size === 0) {
-      warnings.push({
-        kind: "endpoint-no-stores",
-        detail: `${ep.name} (${ep.file}) — no store reads/writes resolved`,
-      });
-    }
+  // Dedupe edges; drop any that reference a missing node.
+  const edges: DFEdge[] = [];
+  const edgeSeen = new Set<string>();
+  let edgeIdx = 0;
+  for (const e of rawEdges) {
+    if (!nodeIds.has(e.source) || !nodeIds.has(e.target)) continue;
+    const key = `${e.source}->${e.target}:${e.kind}`;
+    if (edgeSeen.has(key)) continue;
+    edgeSeen.add(key);
+    const data: DFEdge["data"] = { id: `e${edgeIdx++}`, source: e.source, target: e.target, kind: e.kind };
+    if (e.cached !== undefined) data.cached = e.cached;
+    edges.push({ data });
   }
 
-  // ── 7) Counts + return ──────────────────────────────────────────────────────
+  // 7) Warnings (never silently drop; surface gaps).
+  if (containers.length === 0) warnings.push({ kind: "no-container", detail: "no deploy unit detected" });
+  if (endpoints.length === 0) warnings.push({ kind: "no-endpoints", detail: "no HTTP endpoints / server actions detected across any container" });
+  if (routes.length === 0) warnings.push({ kind: "no-frontend", detail: "no frontend routes detected (no Next app/pages dir, no React-Router route table)" });
+  if (storeNodes.size === 0) warnings.push({ kind: "no-stores", detail: "no datastore usage detected (BigQuery/SQL/Firestore/Mongo/DynamoDB/Cosmos/Redis)" });
+  const reached = new Set<string>();
+  for (const e of edges) if (e.data.kind === "fetch") reached.add(e.data.target);
+  const unreachedBackend = backendEndpoints.filter((e) => !reached.has(e.id)).length;
+  if (backendEndpoints.length && unreachedBackend === backendEndpoints.length) {
+    warnings.push({ kind: "no-fetch-edges", detail: "no frontend→backend calls could be matched by path — endpoints shown unlinked" });
+  }
+
   const counts = {
     routes: nodes.filter((n) => n.data.kind === "fe-route").length,
     containers: nodes.filter((n) => n.data.kind === "container").length,
@@ -1267,6 +1440,5 @@ export async function buildDataflowGraph(): Promise<DFGraph> {
     stores: nodes.filter((n) => n.data.kind === "store").length,
     edges: edges.length,
   };
-
   return { nodes, edges, meta: { built: new Date().toISOString(), counts, warnings } };
 }

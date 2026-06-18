@@ -225,12 +225,10 @@ export class FirestoreProvider implements SchemaProvider {
   }
 
   private async sourceFiles(): Promise<string[]> {
-    return walk(REPO_ROOT, (rel) => {
-      if (!isTsLike(rel)) return false;
-      const top = rel.split(/[\\/]/)[0];
-      // Restrict to plausible source roots, but always allow a flat repo.
-      return COLL_DIRS.includes(top) || !rel.includes("/");
-    });
+    // Repo-wide, language-agnostic: Firestore is reached from a frontend in any
+    // subdir (TS modular `collection(db,'x')`) AND from backend admin SDKs
+    // (Python/Go `.collection('x')`). `walk` already skips node_modules/.venv/etc.
+    return walk(REPO_ROOT, (rel) => isTsLike(rel) || rel.endsWith(".py") || rel.endsWith(".go"));
   }
 
   async introspect(opts: { live?: boolean }): Promise<ProviderResult> {
@@ -435,7 +433,10 @@ function scanFirestoreFile(
   };
 
   const isFirestoreRoot = (id: string): boolean =>
-    /^(firestore|adminDb|db)$/.test(id) || /[Ff]irestore$/.test(id);
+    /^(firestore|adminDb|db|database)$/i.test(id) ||
+    /firestore$/i.test(id) ||
+    // accessor functions: getDb() / getFirestore() / getAdminDb() / getDatabase()
+    /^get(Admin)?(Db|Firestore|Database)$/i.test(id);
 
   // Walk a `.collection(...)/.doc(...)/.collectionGroup(...)` segment chain that
   // begins at `seed` (the collection context inherited from a root ref var, or
@@ -1183,8 +1184,154 @@ const BQ_FIELD_RE =
 const BQ_TABLE_REF_RE = /_table_ref\(\s*client\s*,\s*dataset_id\s*,\s*["']([a-z_][a-z0-9_]*)["']\s*\)/;
 const BQ_CLUSTER_RE = /clustering_fields\s*=\s*\[([^\]]*)\]/;
 const BQ_PARTITION_FIELD_RE = /field\s*=\s*["']([a-z_][a-z0-9_]*)["']/;
-// Backticked fully-qualified table literal: `proj.dataset.table`.
-const BQ_FQN_RE = /`[A-Za-z0-9_-]+\.[A-Za-z0-9_]+\.([A-Za-z_][A-Za-z0-9_]*)`/g;
+
+// Precise BigQuery table discovery. BQ tables are ALWAYS fully-qualified —
+// `project.dataset.table`, usually with interpolation (`{ds}.recent_signals`).
+// We accept a dotted reference ONLY in a real table context (after a SQL table
+// keyword, as a `_table_ref(..., "name")` / `.table("name")` call, or as a whole
+// FQN literal) and take its last segment — so CTEs, aliases, and `module.fn`
+// doc-refs in docstrings never become tables.
+const SEG = String.raw`(?:\$?\{[^}]+\}|\`?[A-Za-z_][\w-]*\`?)`;
+const BQ_FQN_CLAUSES = [
+  new RegExp(String.raw`\b(?:FROM|JOIN|INTO|UPDATE|MERGE(?:\s+INTO)?|TABLE)\s+\`?(${SEG}(?:\.${SEG})+)`, "gi"),
+];
+const BQ_TABLE_CALL_RE = /(?:_table_ref\s*\([^,]*,[^,]*,\s*|[.]\s*table\s*\(\s*)["']([a-z_][a-z0-9_]*)["']/g;
+const BQ_WHOLE_FQN_RE = new RegExp(String.raw`^${SEG}(?:\.${SEG}){1,2}$`);
+
+const BQ_KEYWORDS = new Set([
+  "select", "from", "where", "join", "on", "as", "and", "or", "group", "order",
+  "by", "limit", "offset", "having", "qualify", "partition", "cluster", "over",
+  "with", "union", "all", "distinct", "case", "when", "then", "else", "end",
+  "unnest", "values", "set", "into", "using", "cross", "inner", "left", "right",
+  "outer", "full", "if", "ifnull", "coalesce", "date", "datetime", "timestamp",
+  "json", "null", "true", "false", "exists", "in", "not", "is", "asc", "desc",
+  "lateral", "table", "row", "rows", "between", "like", "the",
+]);
+const BQ_NON_TABLE = new Set([
+  "dataframe", "columns", "tables", "partitions", "logger", "log", "dataset",
+  "dataset_id", "table_id", "project", "project_id", "client", "self", "py",
+  "md", "info", "debug", "warning", "error", "live", "staging", "stg", "snap",
+  "tbl", "col", "tmp", "temp", "prod", "dev",
+  // MERGE / DML pseudo-relations and aliases (not real tables).
+  "completed", "deleted", "updated", "inserted", "merged", "matched", "source",
+  "target", "dual", "new", "old", "excluded",
+]);
+
+function looksLikeFqn(ref: string): boolean {
+  return /[{}]/.test(ref) || (ref.match(/\./g) || []).length >= 2;
+}
+function bqLastSegment(ref: string): string | null {
+  if (/information_schema/i.test(ref)) return null;
+  const seg = (ref.split(".").pop() ?? "").trim();
+  if (/^\$?\{.*\}$/.test(seg)) return null; // pure interpolation → dynamic name
+  const cleaned = seg.replace(/[`${}]/g, "").trim();
+  if (!/^[A-Za-z]\w*$/.test(cleaned)) return null; // letter-led, no _private
+  if (cleaned.endsWith("_")) return null; // incomplete interpolation (e.g. `…_pre_`)
+  const lc = cleaned.toLowerCase();
+  if (cleaned.length < 3 || BQ_KEYWORDS.has(lc) || BQ_NON_TABLE.has(lc)) return null;
+  return cleaned;
+}
+
+// Pull SQL/template string-literal contents from a source file (skips #, //, /* */
+// comments so doc-text backtick refs don't masquerade as table references).
+function bqStringLiterals(src: string): string[] {
+  const out: string[] = [];
+  let i = 0;
+  while (i < src.length) {
+    const c = src[i];
+    if (c === '"' || c === "'" || c === "`") {
+      // Python triple-quote support: treat """…""" / '''…''' as one literal.
+      const triple = src.slice(i, i + 3);
+      if (triple === '"""' || triple === "'''") {
+        const end = src.indexOf(triple, i + 3);
+        out.push(src.slice(i + 3, end < 0 ? src.length : end));
+        i = end < 0 ? src.length : end + 3;
+        continue;
+      }
+      const q = c;
+      let j = i + 1, buf = "";
+      while (j < src.length) {
+        if (src[j] === "\\") { buf += src[j + 1] ?? ""; j += 2; continue; }
+        if (src[j] === q) break;
+        buf += src[j]; j++;
+      }
+      out.push(buf);
+      i = j + 1;
+      continue;
+    }
+    if (c === "#") { const nl = src.indexOf("\n", i); i = nl < 0 ? src.length : nl; continue; }
+    if (c === "/" && src[i + 1] === "/") { const nl = src.indexOf("\n", i); i = nl < 0 ? src.length : nl; continue; }
+    if (c === "/" && src[i + 1] === "*") { const e = src.indexOf("*/", i); i = e < 0 ? src.length : e + 2; continue; }
+    i++;
+  }
+  return out;
+}
+
+// Every table this file references (in a genuine table context).
+function collectBqTables(src: string): Set<string> {
+  const out = new Set<string>();
+  // Explicit table-ref / .table() calls (scan raw — these are unambiguous).
+  let m: RegExpExecArray | null;
+  BQ_TABLE_CALL_RE.lastIndex = 0;
+  while ((m = BQ_TABLE_CALL_RE.exec(src))) out.add(m[1]);
+  // FQN references inside string literals only.
+  for (const lit of bqStringLiterals(src)) {
+    const trimmed = lit.trim();
+    if (BQ_WHOLE_FQN_RE.test(trimmed) && looksLikeFqn(trimmed)) {
+      const t = bqLastSegment(trimmed);
+      if (t) out.add(t);
+    }
+    for (const re of BQ_FQN_CLAUSES) {
+      re.lastIndex = 0;
+      while ((m = re.exec(lit))) {
+        if (!looksLikeFqn(m[1])) continue;
+        const t = bqLastSegment(m[1]);
+        if (t) out.add(t);
+      }
+    }
+  }
+  return out;
+}
+
+// Best-effort JOIN relations: resolve FROM/JOIN aliases to tables, then read
+// `ON a.col = b.col` equalities into table↔table join edges.
+function collectBqJoins(src: string, known: Set<string>): RelationDef[] {
+  const rels: RelationDef[] = [];
+  const seen = new Set<string>();
+  const aliasRefRe = new RegExp(String.raw`\b(?:FROM|JOIN)\s+\`?(${SEG}(?:\.${SEG})+)\`?(?:\s+(?:AS\s+)?([A-Za-z_]\w*))?`, "gi");
+  const onRe = /\bON\b([\s\S]{0,400}?)(?:\bJOIN\b|\bWHERE\b|\bGROUP\b|\bQUALIFY\b|\bORDER\b|$)/gi;
+  const eqRe = /([A-Za-z_]\w*)\.([A-Za-z_]\w*)\s*=\s*([A-Za-z_]\w*)\.([A-Za-z_]\w*)/g;
+  for (const lit of bqStringLiterals(src)) {
+    if (!/\bJOIN\b/i.test(lit)) continue;
+    // alias → table for this query.
+    const alias = new Map<string, string>();
+    let m: RegExpExecArray | null;
+    aliasRefRe.lastIndex = 0;
+    while ((m = aliasRefRe.exec(lit))) {
+      const t = bqLastSegment(m[1]);
+      if (!t || !known.has(t)) continue;
+      alias.set(t.toLowerCase(), t);
+      if (m[2] && !BQ_KEYWORDS.has(m[2].toLowerCase())) alias.set(m[2].toLowerCase(), t);
+    }
+    if (alias.size < 2) continue;
+    onRe.lastIndex = 0;
+    let om: RegExpExecArray | null;
+    while ((om = onRe.exec(lit))) {
+      eqRe.lastIndex = 0;
+      let em: RegExpExecArray | null;
+      while ((em = eqRe.exec(om[1]))) {
+        const a = alias.get(em[1].toLowerCase()), b = alias.get(em[3].toLowerCase());
+        if (!a || !b || a === b) continue;
+        const [t1, c1, t2, c2] = a < b ? [a, em[2], b, em[4]] : [b, em[4], a, em[2]];
+        const key = `${t1}.${c1}=${t2}.${c2}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        rels.push({ db: "bigquery", kind: "joins", fromTable: t1, fromCol: c1, toTable: t2, toCol: c2, confidence: "low" });
+      }
+    }
+  }
+  return rels;
+}
 
 export class BigQueryProvider implements SchemaProvider {
   db: Db = "bigquery";
@@ -1195,12 +1342,8 @@ export class BigQueryProvider implements SchemaProvider {
     for (const rel of await this.bqFiles()) {
       const src = await safeRead(rel);
       if (!src) continue;
-      if (rel.endsWith("setup_tables.py") && /bigquery\.SchemaField\(/.test(src)) return true;
-      if (BQ_FQN_RE.test(src)) {
-        BQ_FQN_RE.lastIndex = 0;
-        return true;
-      }
-      BQ_FQN_RE.lastIndex = 0;
+      if (/bigquery\.SchemaField\(|from\s+google\.cloud\s+import\s+bigquery|google\.cloud\.bigquery|@google-cloud\/bigquery/.test(src)) return true;
+      if (collectBqTables(src).size > 0) return true;
     }
     return false;
   }
@@ -1223,33 +1366,47 @@ export class BigQueryProvider implements SchemaProvider {
 
     const tables: TableDef[] = [];
     const seen = new Set<string>();
-    const fqnNames = new Set<string>();
+    const referenced = new Set<string>(); // every table name seen via FQN/table-ref
 
-    for (const rel of await this.bqFiles()) {
+    const files = await this.bqFiles();
+    const srcByFile = new Map<string, string>();
+    for (const rel of files) {
       const src = await safeRead(rel);
       if (!src) continue;
-
-      if (rel.endsWith("setup_tables.py") && /bigquery\.SchemaField\(/.test(src)) {
+      srcByFile.set(rel, src);
+      // Tables with full schemas come from setup_tables.py SchemaField blocks.
+      if (/bigquery\.SchemaField\(/.test(src)) {
         parseBqSetupTables(src, tables, seen, warnings);
       }
-      // Generic FQN literal scan across any file.
-      BQ_FQN_RE.lastIndex = 0;
-      let fm: RegExpExecArray | null;
-      while ((fm = BQ_FQN_RE.exec(src))) fqnNames.add(fm[1]);
+      for (const name of collectBqTables(src)) referenced.add(name);
     }
 
-    for (const name of fqnNames) {
-      if (!seen.has(`bigquery:${name}`)) {
-        tables.push({ db: "bigquery", name, fields: [] });
-        seen.add(`bigquery:${name}`);
-        warnings.push({
-          kind: "bq-columns-unknown",
-          detail: `${name}: discovered via FQN literal — columns only available with live introspection`,
-        });
+    // Referenced-but-undefined tables (rollups built via CTAS / load_table_*,
+    // not in setup_tables.py) → shown as cards; columns need live introspection.
+    for (const name of referenced) {
+      if (seen.has(`bigquery:${name}`)) continue;
+      tables.push({ db: "bigquery", name, fields: [] });
+      seen.add(`bigquery:${name}`);
+      warnings.push({
+        kind: "bq-columns-unknown",
+        detail: `${name}: referenced but not defined in setup_tables.py — columns need live introspection`,
+      });
+    }
+
+    // Relationships: JOIN ... ON equalities between known tables.
+    const known = new Set([...tables.map((t) => t.name)]);
+    const relations: RelationDef[] = [];
+    const relSeen = new Set<string>();
+    for (const src of srcByFile.values()) {
+      for (const r of collectBqJoins(src, known)) {
+        const key = `${r.fromTable}.${r.fromCol}=${r.toTable}.${r.toCol}`;
+        if (relSeen.has(key)) continue;
+        relSeen.add(key);
+        relations.push(r);
       }
     }
 
-    return { tables, relations: [], warnings };
+    return { tables, relations, warnings };
   }
 }
 
