@@ -16,9 +16,9 @@
 import { join, isAbsolute, basename } from "node:path";
 import { readdir, readFile, writeFile, mkdir, unlink } from "node:fs/promises";
 import { existsSync, statSync } from "node:fs";
-import { createServer } from "node:net";
 import { homedir } from "node:os";
 import { REPO_ROOT } from "../weave.config.ts";
+import { allocPort, portFree, waitForPortOccupied } from "./ports.ts";
 
 const CACHE_DIR = join(import.meta.dir, "..", "cache", "terminals");
 // Per-terminal "live" status files written by the weave_terminal_live.ts hook (state,
@@ -117,32 +117,8 @@ async function tmuxHasSession(name: string): Promise<boolean> {
 }
 
 // ── Ports ─────────────────────────────────────────────────────────────────
-
-function portFree(port: number): Promise<boolean> {
-  return new Promise((resolve) => {
-    const srv = createServer();
-    srv.once("error", () => resolve(false));
-    srv.once("listening", () => srv.close(() => resolve(true)));
-    srv.listen(port, HOST);
-  });
-}
-
-async function allocPort(used: Set<number>): Promise<number | null> {
-  for (let p = PORT_BASE; p <= PORT_MAX; p++) {
-    if (used.has(p)) continue;
-    if (await portFree(p)) return p;
-  }
-  return null;
-}
-
-async function waitForPortOccupied(port: number, timeoutMs: number): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (!(await portFree(port))) return true; // something is listening => ttyd is up
-    await Bun.sleep(80);
-  }
-  return false;
-}
+// portFree / allocPort / waitForPortOccupied live in ./ports.ts (shared with
+// the smoke harness); the terminal allocator passes its own 7700–7799 range.
 
 // ── Spawning ──────────────────────────────────────────────────────────────
 
@@ -307,7 +283,7 @@ export async function createSession(opts: { cwd?: string; title?: string } = {})
 
   const cwd = resolveCwd(opts.cwd);
   const used = new Set((await readAllRecords()).map((r) => r.port));
-  const port = await allocPort(used);
+  const port = await allocPort(used, { start: PORT_BASE, end: PORT_MAX });
   if (port == null) throw new Error(`no free port available in ${PORT_BASE}-${PORT_MAX}`);
 
   const id = `term-${Date.now().toString(36)}`;
@@ -378,7 +354,7 @@ async function reconcile(): Promise<void> {
     if (!Bun.which("ttyd")) continue;
     try {
       const used = new Set((await readAllRecords()).map((x) => x.port).filter((p) => p !== r.port));
-      const port = (await portFree(r.port)) ? r.port : await allocPort(used);
+      const port = (await portFree(r.port)) ? r.port : await allocPort(used, { start: PORT_BASE, end: PORT_MAX });
       if (port == null) continue;
       const proc = spawnTtyd(r.tmux, port, r.cwd, r.title, r.id);
       if (!(await waitForPortOccupied(port, 2500))) { try { proc.kill(); } catch { /* noop */ } continue; }

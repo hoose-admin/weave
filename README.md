@@ -115,8 +115,9 @@ worktree, self-deliberating on technical decisions (competing viewpoint subagent
 best-practice pick → documented), and landing each ticket in `5-validating/` on a
 pushed branch for your review. It **never merges to main** — you approve by moving a
 ticket to `6-complete/` (or run `/chaos-land`), which merges the branch. When the
-backlog drains it invents new features (`feature-scout`) and keeps going, so the run
-caps and the usage throttle (pause at 90% of the 5-hour window) are the only brakes.
+backlog drains it rotates through its **scouts** — `feature-scout` invents features,
+`ux-audit` and `a11y-audit` propose improvements to what already exists — and keeps going,
+so the run caps and the usage throttle (pause at 90% of the 5-hour window) are the only brakes.
 For full-stack work it keeps architecture coherent by externalizing it — workers read and
 extend the ADRs + schema/dataflow graphs rather than inventing parallel patterns, large
 features are decomposed contract-first (a shared-contract foundation ticket + loosely-coupled

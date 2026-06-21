@@ -12,6 +12,8 @@ DO_SCAN=1
 ASSUME_YES=0
 DO_START=0
 DO_GITPERMS=0
+DO_BROWSERS=1
+ASSUME_BROWSERS=0
 TARGET=""
 
 usage() {
@@ -31,6 +33,10 @@ options:
   --git-perms   merge weave's git allowlist (commit/push/branch/worktree) into
                 .claude/settings.json — off by default so setup never silently
                 widens your permissions
+  --smoke       provision a repo-local headless browser (Chromium) for smoke
+                checks, without prompting
+  --no-smoke    skip headless-browser provisioning entirely, no prompt
+                (default: ASK when a "smoke" block exists in weave.config.json)
   -h, --help    show this help
 EOF
 }
@@ -41,6 +47,8 @@ while [ $# -gt 0 ]; do
     --scan)      ASSUME_YES=1 ;;
     --start)     DO_START=1 ;;
     --git-perms) DO_GITPERMS=1 ;;
+    --smoke)     ASSUME_BROWSERS=1 ;;
+    --no-smoke)  DO_BROWSERS=0 ;;
     --port)    PORT="${2:?--port needs a value}"; PORT_SET=1; shift ;;
     -h|--help) usage; exit 0 ;;
     -*)        echo "unknown option: $1" >&2; usage; exit 2 ;;
@@ -106,10 +114,49 @@ else
   echo "⚠ CLAUDE.md already exists — review $SCRIPT_DIR/CLAUDE.template.md for weave conventions to fold in"
 fi
 
+# ── 4b. keep machine-local weave cache out of git (graphs, smoke browsers) ────
+if [ -e "$TARGET/.gitignore" ] && grep -qxF '.weave/cache/' "$TARGET/.gitignore"; then
+  :
+else
+  printf '\n# weave machine-local cache (graphs, smoke browser binaries + screenshots)\n.weave/cache/\n' >> "$TARGET/.gitignore"
+  echo "→ ensured .weave/cache/ is gitignored"
+fi
+
 # ── 5. build the dashboard graphs (deterministic — no Claude Code needed) ─────
 echo "→ building dashboard graphs"
 ( cd "$TARGET/.weave" && bun run build:graphs ) \
   || echo "⚠ graph build hit an error — the dashboard will build graphs on demand instead"
+
+# ── 5b. optional: provision a repo-local headless browser for smoke checks ────
+#    Installs Chromium into .weave/cache/browsers (gitignored, repo-local — NEVER
+#    ~/.cache/ms-playwright). OPT-IN: only when a "smoke" block exists in
+#    weave.config.json (so CLI/library targets are never asked) or when --smoke
+#    forces it. Setup-time only — never during a chaos run, where the repo-scoping
+#    guard (correctly) blocks installs.
+HAS_SMOKE=0
+grep -q '"smoke"' "$TARGET/weave.config.json" 2>/dev/null && HAS_SMOKE=1
+provision_browsers() {
+  echo "  → provisioning headless Chromium into .weave/cache/browsers (repo-local)…"
+  if ( cd "$TARGET/.weave" && bun run install:browsers ); then
+    echo "  ✓ smoke browser provisioned"
+  else
+    echo "  ⚠ provisioning failed — run later:  (cd \"$TARGET/.weave\" && bun run install:browsers)"
+  fi
+}
+if [ "$ASSUME_BROWSERS" = 1 ]; then
+  provision_browsers
+elif [ "$DO_BROWSERS" = 1 ] && [ "$HAS_SMOKE" = 1 ]; then
+  if [ -t 0 ]; then
+    printf "  Provision a repo-local headless browser for smoke checks? [y/N] "
+    _bans=""; read -r _bans || true
+    case "$_bans" in
+      [yY]|[yY][eE][sS]) provision_browsers ;;
+      *) echo "  ↳ skipped — run later:  (cd \"$TARGET/.weave\" && bun run install:browsers)" ;;
+    esac
+  else
+    echo "  (non-interactive — skipping browser provisioning; re-run with --smoke, or: cd .weave && bun run install:browsers)"
+  fi
+fi
 
 # ── 6. first-run bug-scan (seeds the backlog with REAL findings from your code) ──
 #    The deep, multi-agent scan. OPTIONAL but recommended; it can take several
@@ -182,6 +229,15 @@ cat <<'EOF'
     /chaos status   inspect the active run    ·    /chaos stop   halt it
     /chaos-land     merge approved (6-complete) chaos branches to main
   The usage throttle reads your statusline — /chaos offers to wire the snapshot tee (reversible).
+EOF
+
+cat <<'EOF'
+
+  smoke checks (web apps) — catch runtime/console errors that unit tests miss:
+    1. add a "smoke" block to weave.config.json (start command, routes, readySelector)
+    2. one-time, repo-local Chromium:   cd .weave && bun run install:browsers
+  test-ticket then runs a headless smoke automatically for web targets; console
+  errors land in the ticket's evidence. CLI/library repos: skip — it no-ops.
 EOF
 # (bug-scan prompt + messaging handled in step 6 above)
 
