@@ -23,6 +23,20 @@
     ]
   },
   "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v node >/dev/null 2>&1 && node \"$CLAUDE_PROJECT_DIR/.claude/hooks/ponytail-activate.js\" || exit 0",
+            "commandWindows": "if (Get-Command node -ErrorAction SilentlyContinue) { node \"$env:CLAUDE_PROJECT_DIR\\.claude\\hooks\\ponytail-activate.js\" }",
+            "timeout": 5,
+            "statusMessage": "Loading ponytail mode…"
+          }
+        ]
+      }
+    ],
     "UserPromptSubmit": [
       {
         "hooks": [
@@ -40,6 +54,17 @@
             "type": "command",
             "command": "bun \"$CLAUDE_PROJECT_DIR/.claude/hooks/weave_terminal_live.ts\"",
             "timeout": 5
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v node >/dev/null 2>&1 && node \"$CLAUDE_PROJECT_DIR/.claude/hooks/ponytail-mode-tracker.js\" || exit 0",
+            "commandWindows": "if (Get-Command node -ErrorAction SilentlyContinue) { node \"$env:CLAUDE_PROJECT_DIR\\.claude\\hooks\\ponytail-mode-tracker.js\" }",
+            "timeout": 5,
+            "statusMessage": "Tracking ponytail mode…"
           }
         ]
       }
