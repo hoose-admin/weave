@@ -42,6 +42,7 @@ import {
   type ParsedAdr,
 } from "./lib/adrs.ts";
 import { listSessions, createSession, killSession, readLive } from "./lib/terminals.ts";
+import { activeRuns } from "./lib/chaos.ts";
 import { capturePane, inferState } from "./lib/terminal-status.ts";
 
 type GraphKind = "tickets" | "dataflow" | "schemas" | "adrs" | "ai";
@@ -178,7 +179,9 @@ function renderNavbar(active: string, withStatus: boolean): string {
                     ?
                 </button>
             </div>
-        </header>`;
+        </header>
+        <div id="chaos-banner" class="chaos-banner" hidden></div>
+        <script type="module" src="/chaos-banner.js"></script>`;
 }
 
 // Full-navbar marker. Optional `status` token adds the ticket save-status slot.
@@ -897,6 +900,24 @@ const serveOptions = {
       } catch {
         return json({ active: null, active_list: [] });
       }
+    }
+
+    // Active chaos run — drives the red dashboard banner. Reads the run records
+    // the supervisor writes to .weave/cache/chaos/ (status running | paused_usage).
+    if (pathname === "/api/chaos/active" && req.method === "GET") {
+      const runs = activeRuns();
+      const r = runs[0];
+      if (!r) return json({ active: null });
+      return json({
+        active: {
+          id: r.id,
+          status: r.status,
+          built: r.processed.filter((p) => p.outcome === "validating").length,
+          skipped: r.processed.filter((p) => p.outcome === "stuck").length,
+          in_flight: r.in_flight,
+          generated_features: r.generated_features,
+        },
+      });
     }
 
     // Terminal sessions — ttyd-backed local terminals (lib/terminals.ts). Each

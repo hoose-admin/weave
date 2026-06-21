@@ -33,6 +33,26 @@
             "commandWindows": "if (Get-Command node -ErrorAction SilentlyContinue) { node \"$env:CLAUDE_PROJECT_DIR\\.claude\\hooks\\ponytail-activate.js\" }",
             "timeout": 5,
             "statusMessage": "Loading ponytail mode…"
+          },
+          {
+            "type": "command",
+            "command": "command -v node >/dev/null 2>&1 && node \"$CLAUDE_PROJECT_DIR/.claude/hooks/chaos-activate.js\" || exit 0",
+            "commandWindows": "if (Get-Command node -ErrorAction SilentlyContinue) { node \"$env:CLAUDE_PROJECT_DIR\\.claude\\hooks\\chaos-activate.js\" }",
+            "timeout": 5,
+            "statusMessage": "Checking chaos mode…"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v node >/dev/null 2>&1 && node \"$CLAUDE_PROJECT_DIR/.claude/hooks/chaos-guard.js\" || exit 0",
+            "commandWindows": "if (Get-Command node -ErrorAction SilentlyContinue) { node \"$env:CLAUDE_PROJECT_DIR\\.claude\\hooks\\chaos-guard.js\" }",
+            "timeout": 5
           }
         ]
       }

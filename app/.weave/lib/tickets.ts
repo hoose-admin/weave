@@ -380,7 +380,7 @@ function summary(
     title: (fm.title as string | undefined) ?? "(untitled)",
     priority: (fm.priority as string | undefined) ?? "Medium",
     domain: (fm.domain as string | undefined) ?? "meta",
-    complexity: typeof fm.complexity === "number" ? fm.complexity : undefined,
+    complexity: toNum(fm.complexity),
     tags: (fm.tags as string[] | undefined) ?? [],
     filename,
     bucket,
@@ -399,4 +399,17 @@ function summary(
 function idNum(id: string): number {
   const m = id.match(/(\d+)/);
   return m ? Number(m[1]) : 0;
+}
+
+/** Coerce a frontmatter scalar to a number. The minimal YAML parser returns
+ *  every scalar as a string, so `complexity: 3` round-trips from disk as the
+ *  string "3" — without this, complexity reads back as undefined and the
+ *  complexity-based routing (plan-stack, chaos's complexity cap) silently
+ *  never fires. */
+function toNum(v: unknown): number | undefined {
+  if (typeof v === "number") return Number.isFinite(v) ? v : undefined;
+  if (typeof v === "string" && v.trim() !== "" && Number.isFinite(Number(v))) {
+    return Number(v);
+  }
+  return undefined;
 }

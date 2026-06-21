@@ -87,7 +87,7 @@ bun "$SCRIPT_DIR/scripts/merge-settings.ts" "$SCRIPT_DIR/settings.template.json"
 
 # ── 3. scaffold the .tickets board ───────────────────────────────────────────
 echo "→ scaffolding .tickets board (9 buckets + ADRs)"
-for b in scratch 0-backlog 1-staging 2-stuck 3-building 4-testing 5-validating 6-complete 7-archive ADRs; do
+for b in scratch 0-backlog 1-staging 2-stuck 3-building 4-testing 5-validating 6-complete 7-archive ADRs chaos-runs; do
   mkdir -p "$TARGET/.tickets/$b"
   [ -e "$TARGET/.tickets/$b/.gitkeep" ] || : > "$TARGET/.tickets/$b/.gitkeep"
 done
@@ -174,6 +174,15 @@ if [ "$DO_GITPERMS" = 1 ]; then
 else
   echo "  (git perms NOT granted — re-run with --git-perms to let wt sessions push unprompted.)"
 fi
+
+cat <<'EOF'
+
+  chaos mode — fully-autonomous ticket execution (Claude Max only):
+    /chaos          arm a run (requires an explicit "arm chaos" confirm; --git-perms lets it push branches)
+    /chaos status   inspect the active run    ·    /chaos stop   halt it
+    /chaos-land     merge approved (6-complete) chaos branches to main
+  The usage throttle reads your statusline — /chaos offers to wire the snapshot tee (reversible).
+EOF
 # (bug-scan prompt + messaging handled in step 6 above)
 
 if [ "$DO_START" = 1 ]; then

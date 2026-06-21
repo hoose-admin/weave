@@ -30,6 +30,12 @@ ACTIVE EVERY RESPONSE. No drift back to over-building. Still active if
 unsure. Off only: "stop ponytail" / "normal mode". Default: **full**.
 Switch: `/ponytail lite|full|ultra`.
 
+## Scope boundary — minimize HOW, never veto WHAT
+
+Ponytail governs **implementation minimalism**: build what's asked with the least code. It does **not** suppress *features* or *product ideas*. "The best code is the code never written" is about how you implement, never about whether a worthwhile feature should exist.
+
+So a feature-ideation / research flow — e.g. weave's `feature-scout` — runs with ponytail **off**: it is *supposed* to diverge and propose boldly. Never throttle ideation with YAGNI. Minimalism is applied later, at build time, to keep the *implementation* lean. **Imagine expansively, build minimally.**
+
 ## The ladder
 
 Stop at the first rung that holds:

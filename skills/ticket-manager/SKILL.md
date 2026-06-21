@@ -117,6 +117,8 @@ Triggered before any of:
    Treat any of these as **user-driven, no question asked**:
    - "user-driven", "manual", "step by step", "one step at a time", "I'll drive"
 
+   **Chaos is a third execution mode, but it is NOT enterable here.** If the request implies fully-autonomous, *no-human-review* execution ("chaos", "drain the backlog unattended", "no oversight / no review", "arm chaos", "run it autonomously with nobody watching"), do NOT pick a mode — **redirect**: tell the user chaos runs through its own explicit arming ceremony and point them at the `chaos` skill (`/chaos`). Never start chaos from this gate. (Plain "autonomous"/"auto" still means **agentic** — chaos is specifically the *no-review* mode: zero human gates, a `chaos/TKT-NNN` worktree per ticket, lands in `5-validating/`, never merges to main.)
+
    If a mode is detected inline, skip steps 2–3 and jump to step 4 with that pick. Do not echo a confirmation — just proceed and let the first real op's preamble announce what's happening.
 2. Only if no inline mode is detected, output exactly:
    > **Agentic automated flow or user-driven flow?**
@@ -244,6 +246,7 @@ Note in the Context section (or in `files_touched` once known) the repo-relative
 2. Move the file with plain `mv` — **always**, never `git mv`. 
 3. Update the `status` field in the ticket's frontmatter to match the destination (`"Todo"` for backlog/staging, `"Stuck"` for stuck, `"In Progress"` for building, `"Testing"` for testing, `"Validating"` for validating, `"Complete"` for complete, `"Archived"` for archive).
 4. If moving to `6-complete`, add a `completed: YYYY-MM-DD` field to the frontmatter (today's date). The `.weave/` server's `archiveStaleComplete()` reads this on every `/api/buckets` poll to decide when to migrate the ticket to `7-archive/`.
+5. **Chaos auto-land (only when moving to `6-complete`).** If the ticket has a `chaos_branch:` frontmatter field and no `merged:` stamp, it is approved chaos work — moving it to complete is the approval signal. Run `bun .weave/scripts/chaos-merge.ts reconcile` to merge the approved `chaos/*` branch into the target branch (idempotent; it only ever touches `chaos/*` branches, runs in a dedicated worktree, stamps `merged:`/`merge_commit:`, and flags any conflict with `merge_conflict: true` for the user to resolve by hand). Skip this step for non-chaos tickets (no `chaos_branch`).
 
 ### Allowed transitions
 
