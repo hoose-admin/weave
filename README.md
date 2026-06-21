@@ -97,6 +97,43 @@ Drag tickets between buckets in the UI, edit them in the browser, or let the
 `ticket-manager` skill drive the lifecycle. Completed tickets auto-archive after
 7 days.
 
+## Execution modes (how tickets get built)
+
+There are three ways to drive a ticket from backlog to done, in increasing autonomy:
+
+|  | **user-driven** | **agentic** | **chaos** |
+|---|---|---|---|
+| Human gates | every step | once (commit prompt) | **zero** |
+| When stuck | you decide | waits in `2-stuck/` | **deliberates (multi-agent), or skips** |
+| Isolation | current tree | current tree | **`chaos/TKT-NNN` worktree per ticket** |
+| Ends at | you move it | `5-validating/` | **`5-validating/`, branch pushed, never merged** |
+| Start it | just work | the flow-gate | **`/chaos` arming ceremony only** |
+
+**Chaos mode** (`/chaos`) is fully autonomous — no human in the loop. A background
+supervisor drains the backlog, running a fresh `claude -p` per ticket in its own git
+worktree, self-deliberating on technical decisions (competing viewpoint subagents →
+best-practice pick → documented), and landing each ticket in `5-validating/` on a
+pushed branch for your review. It **never merges to main** — you approve by moving a
+ticket to `6-complete/` (or run `/chaos-land`), which merges the branch. When the
+backlog drains it invents new features (`feature-scout`) and keeps going, so the run
+caps and the usage throttle (pause at 90% of the 5-hour window) are the only brakes.
+For full-stack work it keeps architecture coherent by externalizing it — workers read and
+extend the ADRs + schema/dataflow graphs rather than inventing parallel patterns, large
+features are decomposed contract-first (a shared-contract foundation ticket + loosely-coupled
+pieces), and contract-establishing tickets run one at a time.
+
+> ⚠ Chaos requires a **Claude Max** subscription (each ticket runs Opus 4.8 at `xhigh`
+> under a usage throttle) and is **experimental** — autonomous coding agents have wiped
+> production databases. Its safety rests on three guarantees: branch-only/never-main,
+> everything lands in `5-validating/` for review, and nothing arms without the explicit
+> `arm chaos` confirmation. Stop a run anytime with `/chaos stop` or `touch .tickets/STOP`.
+
+### Ideation vs. minimalism (the ponytail boundary)
+
+`feature-scout` (the creative layer that invents features) runs with **ponytail OFF** —
+ponytail governs *implementation minimalism* (build it with the least code), never
+*feature suppression* (what to build). Imagine expansively, build minimally.
+
 ## The graphs (`/graphs/...`)
 
 | View | What it shows |
