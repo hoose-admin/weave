@@ -58,3 +58,9 @@ disk are the source of truth. The dashboard never runs git.
 - **Run / build:** <commands>
 - **Tests:** <how to run them — and run them before marking a ticket done>
 - **Conventions:** <anything Claude should always follow>
+
+<!-- Web app? Add a "smoke" block to weave.config.json (start command, routes,
+     readySelector) and run `cd .weave && bun run install:browsers` once. The
+     test-ticket gate then boots your app in a headless browser and fails on
+     console errors / uncaught exceptions / stuck spinners — catching runtime
+     breakage that unit tests miss. CLI/library? Omit it; smoke just no-ops. -->

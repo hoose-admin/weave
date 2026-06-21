@@ -6,7 +6,9 @@
   "scripts": {
     "start": "bun --hot server.ts",
     "build:graphs": "bun lib/graphs/build-all.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "smoke": "bun run scripts/smoke.ts",
+    "install:browsers": "bun run scripts/install-browsers.ts"
   },
   "devDependencies": {
     "@types/bun": "latest",

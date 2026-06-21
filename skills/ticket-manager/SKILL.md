@@ -658,8 +658,26 @@ Post-build verification by a **fresh `Agent` subagent**. The subagent reads the 
 
    **Notes:** <subagent notes, verbatim>
    ```
-8. **On pass:** `move-ticket` to `5-validating`. Then auto-fire `validate-ticket` (next op) in agentic mode; in user-driven mode, stop and report.
-9. **On fail (or evidence rejection):** `move-ticket` to `2-stuck/` with frontmatter `test_failed: true` and the verdict appended. Append a `### Stuck Reason` block per the `mark-stuck` op format, citing which AC bullet(s) failed and what evidence was missing. The user triages and re-invokes the agentic flow after fixing the cause.
+8. **Smoke check — web targets only (deterministic; catches runtime/console errors unit tests miss).** If a `smoke` block exists in `weave.config.json`, run the headless-browser smoke and fold it into the evidence:
+   - From the repo/worktree root, run `bun .weave/scripts/smoke.ts --ticket TKT-NNN`. It boots the app on a free port, drives headless Chromium over the configured routes, and prints a JSON `SmokeResult` to stdout (screenshots + `result.json` land in `.weave/cache/smoke/TKT-NNN/`). Treat that JSON as ground truth — never summarize past it or override it.
+   - Append a `### Smoke Check` subsection under `### Test Results`, with console errors **verbatim**:
+     ```markdown
+     ### Smoke Check
+
+     **Headless Chromium:** PASS | FAIL | SKIPPED (<reason>)
+
+     | Route | Result | Console | Page errors | Failed req | Notes |
+     |---|---|---|---|---|---|
+     | <route> | ✓/✗ | <n> | <n> | <n> | <note> |
+
+     **Captured console errors (verbatim):**
+     - `<message>`
+
+     **Screenshots:** `.weave/cache/smoke/TKT-NNN/<route>.png`
+     ```
+   - Outcome: **`skipped`** (no `smoke` block, browsers not provisioned, or driver absent) → record AS skipped and proceed — a skip is NOT a pass and never fails the ticket. **`pass`** → proceed. **`fail` / `error`** → a test failure (step 10).
+9. **On pass:** the AC verdict AND the smoke check (pass or skipped) are both clean. `move-ticket` to `5-validating`. Then auto-fire `validate-ticket` (next op) in agentic mode; in user-driven mode, stop and report.
+10. **On fail (AC evidence rejection, OR a smoke `fail`/`error`):** `move-ticket` to `2-stuck/` with frontmatter `test_failed: true` and the verdict appended. Append a `### Stuck Reason` block per the `mark-stuck` op format, citing which AC bullet(s) failed and/or which smoke route(s) failed, with the captured console errors. The user (or, in chaos, the next worker) triages and re-invokes the flow after fixing the cause.
 
 ### Honesty rules
 

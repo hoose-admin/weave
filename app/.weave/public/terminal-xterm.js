@@ -178,6 +178,19 @@ function connect() {
     };
 }
 
+// ── clipboard ─────────────────────────────────────────────────────────────────
+// xterm renders the terminal to a <canvas>, so a mouse selection is xterm's own
+// model painted over that canvas — not real DOM/text selection the OS can see.
+// Two consequences this client has to handle: (1) the browser's native Cmd+C has
+// nothing to copy (no selected DOM text), and (2) the running TUI's frequent
+// repaints (Claude Code's spinner, cursor, status line) clear xterm's selection
+// overlay almost as soon as you make it. We stash every non-empty selection here
+// so Cmd+C (below) can copy the most recent one even after a repaint wiped the
+// on-screen highlight. Paste needs no help: the browser's native paste event
+// still reaches xterm's hidden textarea, so Cmd+V works once Cmd+C populates the
+// clipboard.
+let lastSelection = "";
+
 // ── custom key handling — the reason this client exists ───────────────────────
 function installKeyHandler() {
     term.attachCustomKeyEventHandler((e) => {
@@ -218,6 +231,22 @@ function installKeyHandler() {
             return false;
         }
 
+        // Cmd+C → copy the selection. xterm has no native copy (canvas, not DOM
+        // text), so we do it: write the live selection, or the last one we saw
+        // before a repaint cleared it, to the clipboard. With nothing selected we
+        // fall through — Cmd+C has no terminal meaning, and Ctrl+C/SIGINT is ctrl,
+        // not meta, so it stays untouched.
+        if (e.key === "c" && e.metaKey && !e.altKey && !e.ctrlKey) {
+            const sel = term.getSelection() || lastSelection;
+            if (sel) {
+                e.preventDefault();
+                navigator.clipboard?.writeText(sel).catch(() => {
+                    /* clipboard blocked (perms / insecure context) — ignore */
+                });
+                return false;
+            }
+        }
+
         return true; // everything else: xterm's normal handling
     });
 }
@@ -230,6 +259,13 @@ if (!port) {
     installKeyHandler();
     term.onData((d) => sendInput(d));
     term.onResize(() => sendResize());
+
+    // Remember the most recent non-empty selection so Cmd+C can copy it even
+    // after a TUI repaint clears the on-screen highlight (see installKeyHandler).
+    term.onSelectionChange(() => {
+        const sel = term.getSelection();
+        if (sel) lastSelection = sel;
+    });
 
     new ResizeObserver(() => safeFit()).observe(mount);
     window.addEventListener("resize", safeFit);

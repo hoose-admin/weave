@@ -79,9 +79,11 @@ export type ChaosConfig = {
   // model / effort pinned per child
   model: string;
   effort: string;
-  // creative layer (feature-scout)
+  // creative layer — generative/audit scouts rotated through when the backlog
+  // drains (corrective bug-scan, generative feature-scout, optimization audits).
   generate_when_dry: boolean;
-  max_generated_features: number; // per run
+  scouts: string[]; // round-robin order; only finalize when a FULL rotation finds nothing
+  max_generated_features: number; // per-run cap on auto-generated tickets (all scouts)
   min_feature_score: number; // saturation floor (0–100)
   // merge loop
   auto_merge_on_complete: boolean;
@@ -107,6 +109,7 @@ export const DEFAULT_CONFIG: ChaosConfig = {
   model: "claude-opus-4-8",
   effort: "xhigh",
   generate_when_dry: true,
+  scouts: ["feature-scout", "ux-audit", "a11y-audit"],
   max_generated_features: 5,
   min_feature_score: 60,
   auto_merge_on_complete: true,
@@ -270,6 +273,7 @@ export type ChaosRun = {
   in_flight: string[]; // ticket ids currently being worked
   processed: ProcessedTicket[];
   generated_features: number;
+  scout_cursor: number; // position in the scout rotation (round-robin when dry)
   adrs_created: number;
   usage_start: UsageSnapshot | null;
   usage_end: UsageSnapshot | null;
@@ -300,6 +304,7 @@ export function newRun(config: ChaosConfig): ChaosRun {
     in_flight: [],
     processed: [],
     generated_features: 0,
+    scout_cursor: 0,
     adrs_created: 0,
     usage_start: readSnapshot(),
     usage_end: null,

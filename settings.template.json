@@ -15,7 +15,9 @@
       "Bash(git log:*)",
       "Bash(git show:*)",
       "Bash(git stash:*)",
-      "Bash(git rev-parse:*)"
+      "Bash(git rev-parse:*)",
+      "Bash(bun run smoke:*)",
+      "Bash(bun .weave/scripts/smoke.ts:*)"
     ],
     "deny": [
       "Bash(git push --force:*)",
@@ -46,7 +48,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "Bash",
+        "matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit",
         "hooks": [
           {
             "type": "command",

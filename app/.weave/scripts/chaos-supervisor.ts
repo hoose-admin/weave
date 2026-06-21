@@ -33,6 +33,7 @@ import {
   type ChaosRun,
   type ProcessedTicket,
   chaosBranch,
+  claudeDir,
   clearChaosFlag,
   desiredConcurrency,
   loadConfig,
@@ -50,10 +51,18 @@ import { pickBatch, type Eligible } from "./chaos-eligible.ts";
 
 const DRY_RUN = process.argv.includes("--dry-run");
 
-// Tools the worker may never use — the supervisor owns commit/push/branch ops,
-// and destructive commands are off-limits. The chaos-guard PreToolUse hook is
-// the second, repo-wide layer of this same boundary.
+// Tools the worker may never use — the ALWAYS-ON enforcement layer (a git
+// worktree may not carry `.claude/`, so the chaos-guard hook can be absent;
+// these `--disallowedTools` rules are passed on every invocation). The supervisor
+// owns commit/push/branch ops; installs stay repo-local; the user's global
+// ~/.claude is off-limits. Bash prefix rules are leaky on flag/abbrev variants
+// (`npm i -g`, `--global`), so the chaos-guard regex hook — injected below via
+// `--settings` — is the robust backstop for those.
+const CLAUDE_DIR = claudeDir();
+// Absolute-path globs use the `//<path>` form (double-slash = absolute).
+const CLAUDE_DIR_GLOB = "//" + CLAUDE_DIR.replace(/^\/+/, "") + "/**";
 const WORKER_DENY = [
+  // supervisor owns git history; destructive shell off-limits
   "Bash(rm:*)",
   "Bash(git push:*)",
   "Bash(git commit:*)",
@@ -65,7 +74,65 @@ const WORKER_DENY = [
   "Bash(git merge:*)",
   "Bash(git rebase:*)",
   "Bash(npm publish:*)",
+  // keep installs repo-local — no machine/account-global mutations
+  "Bash(npm install -g:*)",
+  "Bash(npm i -g:*)",
+  "Bash(npm install --global:*)",
+  "Bash(pnpm add -g:*)",
+  "Bash(pnpm add --global:*)",
+  "Bash(yarn global:*)",
+  "Bash(bun add -g:*)",
+  "Bash(bun add --global:*)",
+  "Bash(npm link:*)",
+  "Bash(brew:*)",
+  "Bash(pipx:*)",
+  "Bash(gem install:*)",
+  "Bash(cargo install:*)",
+  // never mutate the user's global Claude account/config (plugins/skills/MCP/settings)
+  "Bash(claude plugin:*)",
+  "Bash(claude mcp:*)",
+  "Bash(claude config:*)",
+  `Edit(${CLAUDE_DIR_GLOB})`,
+  `Write(${CLAUDE_DIR_GLOB})`,
+  `NotebookEdit(${CLAUDE_DIR_GLOB})`,
 ];
+
+// Inject the chaos-guard PreToolUse hook into the worker via `--settings` so the
+// robust regex checks run even though the worktree has no `.claude/`. Resolved
+// against the rendered install (`.claude/hooks`) first, then the weave source
+// tree (`hooks/`). Returns null (and we skip --settings) if neither exists, so a
+// missing file never injects a broken hook.
+function guardHookPath(): string | null {
+  const candidates = [
+    join(REPO_ROOT, ".claude", "hooks", "chaos-guard.js"), // vendored install
+    join(import.meta.dir, "..", "..", "..", "hooks", "chaos-guard.js"), // weave source repo
+  ];
+  return candidates.find((p) => existsSync(p)) ?? null;
+}
+
+function workerSettingsArgs(): string[] {
+  // Both of these ride the worker's `--settings` so neither depends on the target
+  // having merged weave's perms (merge-settings only merges permissions.allow with
+  // --git-perms) or on the worktree carrying a .claude/ (it doesn't):
+  //   • permissions.allow — let the worker run the smoke harness; acceptEdits
+  //     DENIES non-allowlisted Bash in headless `-p` (no prompt to grant it).
+  //   • the chaos-guard PreToolUse hook — so its regex repo-scoping checks run.
+  const settings: Record<string, unknown> = {
+    permissions: { allow: ["Bash(bun run smoke:*)", "Bash(bun .weave/scripts/smoke.ts:*)"] },
+  };
+  const guard = guardHookPath();
+  if (guard) {
+    settings.hooks = {
+      PreToolUse: [
+        {
+          matcher: "Bash|Edit|Write|MultiEdit|NotebookEdit",
+          hooks: [{ type: "command", command: `node ${JSON.stringify(guard)}`, timeout: 5 }],
+        },
+      ],
+    };
+  }
+  return ["--settings", JSON.stringify(settings)];
+}
 
 type Sh = { code: number; stdout: string; stderr: string };
 
@@ -136,9 +203,23 @@ function removeWorktree(path: string): void {
   git(["worktree", "remove", "--force", path]);
 }
 
+/** Delete a chaos branch IFF it carries no commits of its own (a bare HEAD
+ *  pointer). createWorktree creates the branch up-front, but a failed/abandoned
+ *  attempt never commits to it; without this they pile up as empty
+ *  `chaos/TKT-NNN` debris. A branch with real work (rev-list count > 0) is never
+ *  touched. Call only AFTER the worktree is removed — a checked-out branch can't
+ *  be deleted. */
+function deleteEmptyBranch(branch: string): void {
+  if (DRY_RUN) return;
+  const exists = git(["show-ref", "--verify", "--quiet", `refs/heads/${branch}`]).code === 0;
+  if (!exists) return;
+  const ahead = git(["rev-list", "--count", `HEAD..${branch}`]);
+  if (ahead.code === 0 && ahead.stdout.trim() === "0") git(["branch", "-D", branch]);
+}
+
 // ── the worker child ───────────────────────────────────────────────────────────
 
-type WorkerResult = { rateLimited: boolean; code: number };
+type WorkerResult = { rateLimited: boolean; code: number; detail: string };
 
 /** Fork a fresh `claude -p` to drive one ticket through the ticket-manager
  *  pipeline headlessly. Pins model/effort/budget, points the board at root,
@@ -172,6 +253,7 @@ async function runWorkerAsync(ticketId: string, worktree: string, cfg: ChaosConf
       "json",
       "--disallowedTools",
       WORKER_DENY.join(" "),
+      ...workerSettingsArgs(),
     ],
     {
       cwd: worktree,
@@ -196,18 +278,22 @@ async function runWorkerAsync(ticketId: string, worktree: string, cfg: ChaosConf
   const rateLimited =
     /rate.?limit|usage limit|429|quota (exceeded|reached)/.test(blob) ||
     /\b5-?hour\b.*\b(limit|reached)\b/.test(blob);
-  return { rateLimited, code: proc.exitCode ?? 1 };
+  // Keep a short tail of the worker's own output so a failure can be EXPLAINED in
+  // the run report — otherwise all we'd record is "error" with no cause.
+  const detail = (err.trim() || out.trim()).split("\n").filter(Boolean).slice(-4).join(" ").slice(-280);
+  return { rateLimited, code: proc.exitCode ?? 1, detail };
 }
 
-/** When the backlog runs dry, invent more work. Runs `feature-scout` at the
- *  repo root with ponytail OFF (ideation diverges; minimalism is for build
- *  time) — the creative half of the self-sustaining loop. */
-function runFeatureScout(cap: number, runId: string, cfg: ChaosConfig): void {
+/** When the backlog runs dry, run the next scout in the rotation at the repo
+ *  root with ponytail OFF (ideation/audit diverges; minimalism is for build
+ *  time) — the self-sustaining loop's generative + optimization half. Scouts:
+ *  feature-scout (invent), ux-audit / a11y-audit (refine what exists). */
+function runScout(skill: string, cap: number, runId: string, cfg: ChaosConfig): void {
   sh(
     "claude",
     [
       "-p",
-      `/feature-scout ${cap}`,
+      `/${skill} ${cap}`,
       "--model",
       cfg.model,
       "--effort",
@@ -218,8 +304,9 @@ function runFeatureScout(cap: number, runId: string, cfg: ChaosConfig): void {
       "acceptEdits",
       "--disallowedTools",
       WORKER_DENY.join(" "),
+      ...workerSettingsArgs(),
     ],
-    REPO_ROOT, // feature-scout files backlog tickets at root; no worktree needed
+    REPO_ROOT, // scouts file backlog tickets at root; no worktree needed
     {
       WEAVE_TICKETS_ROOT: TICKETS_ROOT,
       WEAVE_REPO_ROOT: REPO_ROOT,
@@ -239,13 +326,34 @@ async function stuckReason(ticketId: string): Promise<string> {
   return m ? m[1].split("\n").map((l) => l.replace(/^[-*]\s*/, "").trim()).filter(Boolean)[0] ?? "" : "";
 }
 
+/** Record an error outcome and reset the ticket to the backlog for a retry. A
+ *  failed reset is LOGGED, not swallowed — a silent failure here is precisely
+ *  what desynchronises the board (a ticket stranded in the wrong bucket with a
+ *  stale status). */
+async function resetForRetry(base: ProcessedTicket, ticketId: string, reason: string): Promise<ProcessedTicket> {
+  base.outcome = "error";
+  base.skip_reason = reason;
+  if (!DRY_RUN) {
+    const cur = (await readTicket(ticketId))?.bucket;
+    if (cur && cur !== "0-backlog") {
+      try {
+        await moveTicket(ticketId, "0-backlog");
+      } catch (e) {
+        log(`reset of ${ticketId} → 0-backlog FAILED (${(e as Error).message}); it may be stranded in ${cur}`);
+      }
+    }
+  }
+  return base;
+}
+
 /** Inspect the ROOT board to see where the worker left the ticket, then land
- *  the result: commit + push on success, reset on interruption. */
+ *  the result: commit + push on a real build, reset on interruption/failure. */
 async function settle(
   ticketId: string,
   title: string,
   wt: { path: string; branch: string } | null,
   cfg: ChaosConfig,
+  worker?: { code: number; detail: string },
 ): Promise<ProcessedTicket> {
   const full = await readTicket(ticketId);
   const bucket = full?.bucket;
@@ -259,11 +367,21 @@ async function settle(
   };
 
   if (bucket === "5-validating") {
-    // success — commit the worktree's code to the branch, push, keep branch
+    // The worker parked the ticket in validating; only call it a success if it
+    // actually produced code we can commit. (The worker can't commit — that's us.)
     if (wt && !DRY_RUN) {
       git(["add", "-A"], wt.path);
+      // Empty diff = the worker moved the ticket but errored before writing any
+      // code. Don't fake a success (it would leave a 0-commit branch in the
+      // review queue) — reset it for a retry instead.
+      if (git(["diff", "--cached", "--quiet"], wt.path).code === 0) {
+        return resetForRetry(base, ticketId, "parked in validating with an empty diff (no code produced)");
+      }
       const c = git(["commit", "-m", `chaos: ${ticketId} ${title}`.slice(0, 100)], wt.path);
-      if (c.code === 0 && cfg.push_to_remote && hasRemote()) {
+      if (c.code !== 0) {
+        return resetForRetry(base, ticketId, `commit failed: ${c.stderr.trim() || "unknown error"}`);
+      }
+      if (cfg.push_to_remote && hasRemote()) {
         const p = git(["push", "-u", "origin", wt.branch], wt.path);
         if (p.code !== 0) log(`push failed for ${wt.branch}: ${p.stderr.trim()}`);
       }
@@ -280,18 +398,14 @@ async function settle(
     return base;
   }
 
-  // anything else (still mid-pipeline / error): reset so it can be retried, and
-  // record an error outcome.
-  base.outcome = "error";
-  base.skip_reason = bucket ? `left in ${bucket}` : "ticket vanished";
-  if (bucket && bucket !== "0-backlog" && !DRY_RUN) {
-    try {
-      await moveTicket(ticketId, "0-backlog");
-    } catch {
-      /* best-effort reset */
-    }
-  }
-  return base;
+  // anything else (still mid-pipeline / the worker crashed): reset for retry.
+  // Fold in the worker's exit code + output tail so the run report can say WHY.
+  const where = bucket ? `left in ${bucket}` : "ticket vanished";
+  const reason =
+    worker && worker.code !== 0
+      ? `${where}; worker exited ${worker.code}${worker.detail ? ` — ${worker.detail}` : ""}`
+      : where;
+  return resetForRetry(base, ticketId, reason);
 }
 
 type Settled = { processed: ProcessedTicket; rateLimited: boolean };
@@ -320,10 +434,15 @@ async function launchWorker(next: Eligible, runId: string, cfg: ChaosConfig): Pr
   const res = await runWorkerAsync(next.id, wt.path, cfg, runId);
   if (res.rateLimited) {
     removeWorktree(wt.path);
+    deleteEmptyBranch(wt.branch); // bailing on a rate-limit must not leave debris
     return err("interrupted by rate-limit", true);
   }
-  const processed = await settle(next.id, next.title, wt, cfg);
-  removeWorktree(wt.path); // success keeps the branch; the dir is disposable
+  if (res.code !== 0) log(`worker ${next.id} exited ${res.code}${res.detail ? `: ${res.detail}` : ""}`);
+  const processed = await settle(next.id, next.title, wt, cfg, res);
+  removeWorktree(wt.path); // the worktree dir is always disposable
+  // Only a real validating build keeps its branch; every other outcome deletes
+  // the (commit-free) branch the worktree created, so failures leave no debris.
+  if (processed.outcome !== "validating") deleteEmptyBranch(wt.branch);
   return { processed, rateLimited: false };
 }
 
@@ -413,7 +532,10 @@ async function main(): Promise<void> {
       attempts.set(next.id, n);
       if (n > MAX_ATTEMPTS) {
         run.processed.push({ id: next.id, title: next.title, outcome: "error", decisions: [], skip_reason: `gave up after ${MAX_ATTEMPTS} attempts`, ended: nowISO() });
-        if (!DRY_RUN) { try { await moveTicket(next.id, "2-stuck"); } catch {} }
+        if (!DRY_RUN) {
+          try { await moveTicket(next.id, "2-stuck"); }
+          catch (e) { log(`could not park ${next.id} in 2-stuck: ${(e as Error).message}`); }
+        }
         writeRun(run);
         continue;
       }
@@ -433,18 +555,29 @@ async function main(): Promise<void> {
     run.in_flight = [...active.keys()];
     writeRun(run);
 
-    // Nothing running and nothing launchable → backlog dry.
+    // Nothing running and nothing launchable → backlog dry. Rotate through the
+    // scouts (feature-scout invents; ux-audit / a11y-audit refine what exists),
+    // round-robin from the run's cursor. Only finalize when a FULL rotation
+    // finds nothing new — one saturated scout doesn't mean the others are.
     if (active.size === 0) {
-      if (cfg.generate_when_dry && run.generated_features < cfg.max_generated_features && !DRY_RUN && conc > 0) {
+      const scouts = cfg.scouts ?? [];
+      if (cfg.generate_when_dry && scouts.length > 0 && run.generated_features < cfg.max_generated_features && !DRY_RUN && conc > 0) {
         const remaining = cfg.max_generated_features - run.generated_features;
-        const before = (await listBucket("0-backlog")).length;
-        log(`backlog dry — feature-scout inventing up to ${remaining} (ponytail OFF)`);
-        runFeatureScout(remaining, run.id, cfg);
-        const added = Math.max(0, (await listBucket("0-backlog")).length - before);
-        if (added === 0) return finalize(run, "complete", "backlog drained — feature-scout saturated (nothing new)");
+        let added = 0;
+        let used = "";
+        for (let tried = 0; tried < scouts.length && added === 0; tried++) {
+          const skill = scouts[run.scout_cursor % scouts.length];
+          run.scout_cursor++;
+          const before = (await listBucket("0-backlog")).length;
+          log(`backlog dry — running /${skill} (up to ${remaining}, ponytail OFF)`);
+          runScout(skill, remaining, run.id, cfg);
+          added = Math.max(0, (await listBucket("0-backlog")).length - before);
+          used = skill;
+        }
+        if (added === 0) return finalize(run, "complete", `backlog drained — scout rotation saturated (${scouts.join(", ")})`);
         run.generated_features += added;
         writeRun(run);
-        log(`feature-scout filed ${added} new ticket(s)`);
+        log(`/${used} filed ${added} new ticket(s)`);
         continue;
       }
       const why =
