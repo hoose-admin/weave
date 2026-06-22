@@ -44,22 +44,22 @@ Split at **loosely-coupled** seams; keep **tightly-coupled** layers together:
 3. **Order them:** every piece `depends_on` the foundation; the foundation's `architecture` tag makes the supervisor build it **alone, first**, before the pieces (which may then build in parallel).
 4. Keep each piece **≤ complexity 3**. File with `create-ticket`, retire the original, and stop.
 
-## When you would get "stuck" — deliberate, or skip
+## When you would get "stuck" — decide and proceed
 
-Agentic mode waits for a human here. **You cannot wait.** Apply this one-line discriminator to every blocking decision:
+The user has **explicitly delegated every implementation AND product decision to you** — assume they do not care how you implement anything, and there is no human to consult. **Getting stuck is almost never correct.** Your default is ALWAYS: pick the most reasonable, *reversible* choice a thoughtful senior engineer would make, document it, and **build it.**
 
-> **Could a competent senior engineer pick a defensible answer from the codebase + best practices alone, with no business input?**
+This applies to every kind of decision — technical *or* product/ambiguous (which library, data structure, interface shape, error-handling **and** "hard-delete vs soft-delete", default copy, naming, feature scope, UX choices):
 
-- **YES → deliberate and proceed** (technical/architectural calls: which library, data structure, module placement, interface shape, error-handling strategy). Protocol:
-  1. Frame the decision as a crisp question + 2–3 concrete options.
-  2. Spawn **2–3 fresh `Agent` subagents**, each instructed to argue FOR one distinct option as a senior engineer citing best practices (read-only — they propose, they don't edit).
-  3. Judge the winner on merit, in writing, with evidence (cite the code / the trade-off).
-  4. **Document the decision** (next section), then continue the build.
-  - Cap: at most **{{DELIBERATION_CAP}}** deliberations for this ticket. If you blow the cap, you're thrashing — `mark-stuck` and stop.
+1. Frame it as a crisp question + 2–3 concrete options.
+2. For genuinely consequential, far-reaching calls, spawn **2–3 fresh `Agent` subagents** to argue distinct options and judge on merit (read-only — they propose, they don't edit; cap: **{{DELIBERATION_CAP}}** formal deliberations). For routine calls, just pick the sensible default — don't burn the cap deliberating trivia.
+3. **Choose the most reasonable default**, record it in an `### Autonomous Decision` block (next section), and continue. If you'd otherwise thrash past the cap, just pick — never stop over indecision.
 
-- **NO → `mark-stuck` and stop** (human-only blockers: an external dependency/API down, a missing credential/secret, or a **product/ambiguous decision with no safe default** — e.g. "hard-delete vs soft-delete", a pricing rule, anything needing business intent). Write the `### Stuck Reason` block, move to `2-stuck/`, and **stop**. The supervisor will skip to the next ticket; a human resolves it later.
+**`mark-stuck` ONLY in genuinely extreme circumstances** where no useful code can be written at all:
+- a required secret/credential is absent **and** cannot be stubbed, mocked, or feature-flagged off;
+- an external dependency is unreachable with **no** offline/mock path;
+- the only path forward is a destructive/irreversible/dangerous action (data loss, production/billing mutation).
 
-The dangerous failure here is confidently *deliberating* a decision you should have *skipped*. When a choice encodes business/product intent, default to skip.
+Even then, strongly prefer shipping a **safe stub, mock, feature flag, or graceful-degradation path** plus an `### Autonomous Decision` note over stopping. If a prerequisite from another ticket isn't on `main` yet, build against the existing contract, stub the integration point, and note it — **do not stop.** Stopping is the rare exception, never the fallback (the supervisor auto-requeues stuck tickets, so a needless `mark-stuck` just burns a rebuild cycle).
 
 ## Documenting decisions (so a human can review later)
 

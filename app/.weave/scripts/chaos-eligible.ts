@@ -7,9 +7,13 @@
 //     2-stuck..7-archive are not pickable).
 //   • complexity ≤ cap — large/xl (4–5) tickets are left for humans (a
 //     `plan-stack` decomposition is their job, not chaos's).
-//   • dependency-safe — every `depends_on` must already be DONE
-//     (5-validating / 6-complete / 7-archive) and not currently in-flight;
-//     a ticket is never picked while a thing it depends on is unfinished.
+//   • dependency-safe — every `depends_on` must already be LANDED ON MAIN
+//     (6-complete / 7-archive), not merely validating, and not in-flight. A
+//     worker's worktree forks from `main`, so a dep that's only on an unmerged
+//     `chaos/*` branch is INVISIBLE to it — requiring deps in a merged bucket is
+//     what keeps dependents from being stranded. (The supervisor lands clean
+//     work to main every loop, so a prereq becomes visible the iteration after
+//     it validates.)
 //   • not in-flight — never hand the same ticket to two workers.
 //
 // Pure functions + a CLI for debugging/tests. The supervisor imports
@@ -23,7 +27,10 @@ import { listAll, type Bucket, type TicketSummary } from "../lib/tickets.ts";
 import { loadConfig } from "../lib/chaos.ts";
 
 const PICKABLE: ReadonlySet<Bucket> = new Set(["0-backlog", "1-staging"]);
-const DONE: ReadonlySet<Bucket> = new Set(["5-validating", "6-complete", "7-archive"]);
+// A dep counts as DONE only once it's MERGED to main (6-complete / 7-archive) —
+// NOT while it's merely validating on an unmerged branch a fresh worktree can't
+// see. Continuous landing (supervisor `landAndHeal`) keeps this flowing.
+const DONE: ReadonlySet<Bucket> = new Set(["6-complete", "7-archive"]);
 
 const PRIORITY_RANK: Record<string, number> = { High: 0, Medium: 1, Low: 2 };
 

@@ -27,7 +27,8 @@ import { existsSync, readFileSync, symlinkSync } from "node:fs";
 import { basename, join } from "node:path";
 
 import { REPO_ROOT, TICKETS_ROOT } from "../weave.config.ts";
-import { listBucket, moveTicket, readTicket } from "../lib/tickets.ts";
+import { listBucket, moveTicket, readTicket, writeTicket } from "../lib/tickets.ts";
+import { reconcile } from "../lib/chaos-merge.ts";
 import {
   type ChaosConfig,
   type ChaosRun,
@@ -136,11 +137,31 @@ function workerSettingsArgs(): string[] {
 
 type Sh = { code: number; stdout: string; stderr: string };
 
+// Chaos must run on the user's logged-in Claude subscription. Bun auto-loads the
+// repo's .env into this supervisor's process, so any provider credential present
+// there (or in the shell) gets inherited by a spawned `claude -p` and, per Claude
+// Code's auth precedence, OVERRIDES the subscription. Strip every such override
+// before handing the environment to a worker/scout so a run can ONLY resolve to
+// the logged-in subscription session.
+const AUTH_OVERRIDE_VARS = [
+  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_AUTH_TOKEN",
+  "CLAUDE_CODE_OAUTH_TOKEN",
+  "CLAUDE_CODE_USE_BEDROCK",
+  "CLAUDE_CODE_USE_VERTEX",
+  "CLAUDE_CODE_USE_FOUNDRY",
+];
+function subscriptionEnv(extra?: Record<string, string>): Record<string, string> {
+  const e: Record<string, string> = { ...(process.env as Record<string, string>), ...(extra ?? {}) };
+  for (const k of AUTH_OVERRIDE_VARS) delete e[k];
+  return e;
+}
+
 function sh(cmd: string, args: string[], cwd?: string, env?: Record<string, string>): Sh {
   const r = spawnSync(cmd, args, {
     cwd,
     encoding: "utf8",
-    env: env ? { ...process.env, ...env } : process.env,
+    env: subscriptionEnv(env),
     stdio: ["ignore", "pipe", "pipe"],
   });
   return { code: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
@@ -257,14 +278,13 @@ async function runWorkerAsync(ticketId: string, worktree: string, cfg: ChaosConf
     ],
     {
       cwd: worktree,
-      env: {
-        ...process.env,
+      env: subscriptionEnv({
         WEAVE_TICKETS_ROOT: TICKETS_ROOT,
         WEAVE_REPO_ROOT: REPO_ROOT,
         PONYTAIL_DEFAULT_MODE: "full", // build child: ponytail ON
         CHAOS_RUN_ID: runId,
         CHAOS_ACTIVE: "1",
-      },
+      }),
       stdout: "pipe",
       stderr: "pipe",
     },
@@ -371,6 +391,13 @@ async function settle(
     // actually produced code we can commit. (The worker can't commit — that's us.)
     if (wt && !DRY_RUN) {
       git(["add", "-A"], wt.path);
+      // The worktree's node_modules is a SYMLINK back to the root's (seeded in
+      // createWorktree). If the project's .gitignore misses it (e.g. a trailing
+      // `node_modules/` that matches a dir but not the symlink), `git add -A`
+      // stages the symlink and the eventual merge clobbers root node_modules
+      // with a self-reference (ELOOP) — which breaks EVERY future worktree's
+      // build and cascades tickets into stuck. Unstage it unconditionally.
+      git(["reset", "-q", "--", "node_modules"], wt.path);
       // Empty diff = the worker moved the ticket but errored before writing any
       // code. Don't fake a success (it would leave a 0-commit branch in the
       // review queue) — reset it for a retry instead.
@@ -384,6 +411,13 @@ async function settle(
       if (cfg.push_to_remote && hasRemote()) {
         const p = git(["push", "-u", "origin", wt.branch], wt.path);
         if (p.code !== 0) log(`push failed for ${wt.branch}: ${p.stderr.trim()}`);
+      }
+      // Stamp the branch onto the ticket so the merge reconciler can find it on
+      // approval. The worker never writes this; without it `pendingMerges()` —
+      // which keys off `chaos_branch` — sees nothing and the work never lands.
+      if (full) {
+        full.frontmatter.chaos_branch = wt.branch;
+        await writeTicket(ticketId, full.frontmatter, full.body);
       }
     }
     base.outcome = "validating";
@@ -459,6 +493,79 @@ async function finalize(run: ChaosRun, status: ChaosRun["status"], reason: strin
   log(`run ${run.id} → ${status}: ${reason}`);
 }
 
+/** Drop a `### <heading>` block (through the next `###` or EOF) from a body. */
+function stripSection(body: string, heading: string): string {
+  const out: string[] = [];
+  let skip = false;
+  for (const line of body.split("\n")) {
+    if (new RegExp(`^###\\s+${heading}\\b`).test(line)) { skip = true; continue; }
+    if (skip && /^###\s+/.test(line)) skip = false;
+    if (!skip) out.push(line);
+  }
+  return out.join("\n");
+}
+
+/** Continuous self-healing, run once per loop iteration so the board never
+ *  stalls and dependents unblock as their prereqs reach main. Three steps, all
+ *  deterministic (no agent, no blind conflict resolution):
+ *    1. APPROVE — a validated, committed chaos ticket (not still in-flight) is
+ *       moved `5-validating → 6-complete`. Chaos workers already drive the full
+ *       validate gate, so "validating" means automated review passed; the human
+ *       reviews post-hoc via the preserved branches.
+ *    2. LAND — `reconcile()` merges every clean approved branch into main and
+ *       pushes. Conflicts are flagged `merge_conflict` and DEFERRED to
+ *       `/chaos-land` (the agent-driven resolver) — never guessed here.
+ *    3. UNSTICK — a `2-stuck` ticket is handed back to the backlog to rebuild on
+ *       the now-richer main (attempt counter reset), capped at
+ *       `max_unstick_retries` so a genuinely hopeless ticket is eventually left.
+ *  Skips everything that's currently in-flight so it never races a live worker. */
+async function landAndHeal(cfg: ChaosConfig, inFlight: Set<string>, attempts: Map<string, number>): Promise<void> {
+  if (DRY_RUN || !cfg.land_during_run) return;
+
+  // 1. approve validated, committed work
+  for (const t of await listBucket("5-validating")) {
+    if (inFlight.has(t.id)) continue; // worker may not have committed its branch yet
+    if (git(["rev-parse", "--verify", "--quiet", chaosBranch(t.id)]).code !== 0) continue;
+    try {
+      await moveTicket(t.id, "6-complete");
+    } catch (e) {
+      log(`auto-approve ${t.id} failed: ${(e as Error).message}`);
+    }
+  }
+
+  // 2. land clean merges to main (conflicts flagged + deferred to /chaos-land)
+  try {
+    const r = await reconcile();
+    if (r.merged.length) log(`landed → ${r.target}: ${r.merged.map((m) => m.id).join(", ")}`);
+    if (r.conflicts.length) log(`conflicts deferred to /chaos-land: ${r.conflicts.map((m) => m.id).join(", ")}`);
+    if (r.note) log(`reconcile: ${r.note}`);
+  } catch (e) {
+    log(`reconcile failed: ${(e as Error).message}`);
+  }
+
+  // 3. capped auto-unstick → rebuild on the richer main
+  for (const t of await listBucket("2-stuck")) {
+    if (inFlight.has(t.id)) continue;
+    const full = await readTicket(t.id);
+    if (!full) continue;
+    const n = Number(full.frontmatter.chaos_unstick_count ?? 0);
+    if (n >= cfg.max_unstick_retries) continue; // genuinely hopeless — leave it for a human
+    git(["branch", "-D", chaosBranch(t.id)]); // drop the abandoned branch; the rebuild makes a fresh one
+    full.frontmatter.chaos_unstick_count = String(n + 1);
+    for (const k of ["merge_conflict", "chaos_branch", "merged", "merge_commit", "completed", "test_failed", "validation_failed"]) {
+      delete full.frontmatter[k];
+    }
+    await writeTicket(t.id, full.frontmatter, stripSection(full.body, "Stuck Reason"));
+    try {
+      await moveTicket(t.id, "0-backlog");
+      attempts.delete(t.id); // fresh per-run attempt budget for the rebuild
+      log(`unstuck ${t.id} → backlog (retry ${n + 1}/${cfg.max_unstick_retries})`);
+    } catch (e) {
+      log(`auto-unstick ${t.id} failed: ${(e as Error).message}`);
+    }
+  }
+}
+
 async function main(): Promise<void> {
   const cfg = loadConfig();
   const resumeId = (() => {
@@ -474,7 +581,7 @@ async function main(): Promise<void> {
 
   const startMs = Date.parse(run.started);
   const attempts = new Map<string, number>();
-  const MAX_ATTEMPTS = 2;
+  const MAX_ATTEMPTS = 5;
   let backoffMin = 20;
 
   // Adaptive worker pool: ticketId → its running launchWorker promise. The pool
@@ -491,6 +598,10 @@ async function main(): Promise<void> {
 
   while (true) {
     const stopping = stopRequested();
+    // Land clean work to main + auto-unstick before deciding what to pick next,
+    // so dependents see their prereqs on main and a fixable stuck pile doesn't
+    // trigger a premature "backlog dry" finalize. Skipped while halting.
+    if (!stopping) await landAndHeal(cfg, new Set(active.keys()), attempts);
 
     if (active.size === 0) {
       if (stopping) return finalize(run, "halted", ".tickets/STOP present");

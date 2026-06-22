@@ -23,8 +23,8 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { basename, join } from "node:path";
 
 import { REPO_ROOT, TICKETS_ROOT } from "../weave.config.ts";
 
@@ -88,6 +88,8 @@ export type ChaosConfig = {
   // merge loop
   auto_merge_on_complete: boolean;
   resolve_conflicts_with_claude: boolean;
+  land_during_run: boolean; // supervisor lands clean work to main each loop (deps flow → dependents unblock); conflicts deferred to /chaos-land
+  max_unstick_retries: number; // auto-requeue a stuck ticket this many times before leaving it for a human
   merge_target: string; // branch approved work merges into ("" → detect default)
   delete_branch_after_merge: boolean;
   // git
@@ -113,7 +115,9 @@ export const DEFAULT_CONFIG: ChaosConfig = {
   max_generated_features: 5,
   min_feature_score: 60,
   auto_merge_on_complete: true,
-  resolve_conflicts_with_claude: false,
+  resolve_conflicts_with_claude: true,
+  land_during_run: true,
+  max_unstick_retries: 3,
   merge_target: "",
   delete_branch_after_merge: false,
   push_to_remote: true,
@@ -213,6 +217,21 @@ export function worktreePath(ticketId: string): string {
  *  dashboard's working tree. */
 export function mergeWorktreePath(): string {
   return `${REPO_ROOT}-worktrees/chaos-merge`;
+}
+
+/** Worktree the AUTONOMOUS conflict-resolution flow (`/chaos-land`) merges in.
+ *  Kept under the OS temp dir — NOT the repo-sibling `*-worktrees/` dir — so the
+ *  interactive lander agent can Edit conflicted files even while a chaos run is
+ *  armed: the chaos-guard hook allows writes under tmp but denies the repo
+ *  sibling. Distinct from `mergeWorktreePath()` so a live silent reconcile can't
+ *  yank a paused resolution session out from under the agent. */
+export function resolveWorktreePath(): string {
+  // djb2 of the full repo path keeps the tmp name unique per project (two repos
+  // whose dirs share a basename — e.g. both `app/` — won't collide), while the
+  // readable basename suffix keeps it greppable.
+  let h = 5381;
+  for (let i = 0; i < REPO_ROOT.length; i++) h = ((h << 5) + h + REPO_ROOT.charCodeAt(i)) >>> 0;
+  return join(tmpdir(), `weave-chaos-merge-resolve-${basename(REPO_ROOT)}-${h.toString(36)}`);
 }
 
 // ── flag (statusline + hook arming) ────────────────────────────────────────────
