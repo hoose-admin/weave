@@ -35,8 +35,9 @@ function hasRemote(): boolean {
 }
 
 /** The branch approved work merges into: config override, else the remote's
- *  default branch, else main/master. */
-function mergeTarget(cfg: ChaosConfig): string {
+ *  default branch, else main/master. Exported so the supervisor can fork each
+ *  worktree FROM the target — keeping branches linear descendants of it. */
+export function mergeTarget(cfg: ChaosConfig): string {
   if (cfg.merge_target) return cfg.merge_target;
   const sym = git(["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]);
   if (sym.code === 0 && sym.stdout.trim()) return sym.stdout.trim().replace(/^origin\//, "");
@@ -110,11 +111,24 @@ async function stamp(id: string, fields: Record<string, string>, drop: string[] 
   await writeTicket(id, full.frontmatter, full.body);
 }
 
-function mergeOne(pm: PendingMerge, wt: string): MergeResult {
+/** Land a branch into the worktree. With `linear`, first try a fast-forward (no
+ *  merge commit → a single linear history on the target); only if the branch has
+ *  diverged from the target — main moved underneath it — fall back to a `--no-ff`
+ *  merge so the work still lands. Returns the git result of the attempt that ran
+ *  (code 0 = landed; non-0 = conflict, from the merge fallback). */
+function landMerge(pm: PendingMerge, wt: string, linear: boolean): Sh {
+  if (linear) {
+    const ff = git(["merge", "--ff-only", pm.branch], wt);
+    if (ff.code === 0) return ff;
+  }
+  return git(["merge", "--no-ff", "-m", `chaos: land ${pm.id} (${pm.branch})`, pm.branch], wt);
+}
+
+function mergeOne(pm: PendingMerge, wt: string, linear: boolean): MergeResult {
   if (git(["rev-parse", "--verify", "--quiet", pm.branch]).code !== 0) {
     return { id: pm.id, branch: pm.branch, status: "skipped", detail: "branch not found" };
   }
-  const m = git(["merge", "--no-ff", "-m", `chaos: land ${pm.id} (${pm.branch})`, pm.branch], wt);
+  const m = landMerge(pm, wt, linear);
   if (m.code !== 0) {
     git(["merge", "--abort"], wt);
     return { id: pm.id, branch: pm.branch, status: "conflict", detail: "merge conflict — needs manual resolution" };
@@ -179,7 +193,7 @@ export async function reconcile(): Promise<ReconcileReport> {
 
   const results: MergeResult[] = [];
   for (const pm of pend) {
-    const r = mergeOne(pm, wt);
+    const r = mergeOne(pm, wt, cfg.linear_history);
     results.push(r);
     if (r.status === "merged") await stamp(r.id, { merged: today(), merge_commit: r.commit ?? "" }, ["merge_conflict"]);
     else if (r.status === "conflict") await stamp(r.id, { merge_conflict: "true" });
@@ -339,7 +353,7 @@ export async function resolveDriver(): Promise<ResolveReport> {
       skipped.push({ id: pm.id, branch: pm.branch, status: "skipped", detail: "branch not found" });
       continue;
     }
-    const m = git(["merge", "--no-ff", "-m", `chaos: land ${pm.id} (${pm.branch})`, pm.branch], wt);
+    const m = landMerge(pm, wt, cfg.linear_history);
     if (m.code === 0) {
       const sha = git(["rev-parse", "HEAD"], wt).stdout.trim().slice(0, 12);
       merged.push({ id: pm.id, branch: pm.branch, status: "merged", commit: sha });

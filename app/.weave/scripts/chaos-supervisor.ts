@@ -28,7 +28,7 @@ import { basename, join } from "node:path";
 
 import { REPO_ROOT, TICKETS_ROOT } from "../weave.config.ts";
 import { listBucket, moveTicket, readTicket, writeTicket } from "../lib/tickets.ts";
-import { reconcile } from "../lib/chaos-merge.ts";
+import { mergeTarget, reconcile } from "../lib/chaos-merge.ts";
 import {
   type ChaosConfig,
   type ChaosRun,
@@ -192,17 +192,24 @@ function compareUrl(branch: string): string | undefined {
   return m ? `https://github.com/${m[1]}/tree/${branch}` : undefined;
 }
 
-function createWorktree(ticketId: string): { path: string; branch: string } | null {
+function createWorktree(ticketId: string, cfg: ChaosConfig): { path: string; branch: string } | null {
   const path = worktreePath(ticketId);
   const branch = chaosBranch(ticketId);
   if (existsSync(path)) {
     git(["worktree", "remove", "--force", path]); // stale leftover
   }
+  // Fork FROM the merge target (e.g. main), not the repo's current HEAD: with
+  // continuous landing the target already holds every prior ticket, so the new
+  // branch is a linear descendant → landing fast-forwards (single linear
+  // history) and never drags an unrelated checked-out branch into main. Fall
+  // back to HEAD only if the target ref isn't present locally.
+  const target = mergeTarget(cfg);
+  const start = git(["rev-parse", "--verify", "--quiet", target]).code === 0 ? target : "HEAD";
   // If the branch already exists (a prior interrupted attempt), reuse it.
   const branchExists = git(["show-ref", "--verify", "--quiet", `refs/heads/${branch}`]).code === 0;
   const add = branchExists
     ? git(["worktree", "add", path, branch])
-    : git(["worktree", "add", "-b", branch, path]);
+    : git(["worktree", "add", "-b", branch, path, start]);
   if (add.code !== 0) {
     log(`worktree add failed for ${ticketId}: ${add.stderr.trim()}`);
     return null;
@@ -462,7 +469,7 @@ async function launchWorker(next: Eligible, runId: string, cfg: ChaosConfig): Pr
     return { processed: await settle(next.id, next.title, null, cfg), rateLimited: false };
   }
 
-  const wt = createWorktree(next.id);
+  const wt = createWorktree(next.id, cfg);
   if (!wt) return err("worktree creation failed");
 
   const res = await runWorkerAsync(next.id, wt.path, cfg, runId);
