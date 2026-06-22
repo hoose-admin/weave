@@ -104,17 +104,19 @@ There are three ways to drive a ticket from backlog to done, in increasing auton
 |  | **user-driven** | **agentic** | **chaos** |
 |---|---|---|---|
 | Human gates | every step | once (commit prompt) | **zero** |
-| When stuck | you decide | waits in `2-stuck/` | **deliberates (multi-agent), or skips** |
+| When stuck | you decide | waits in `2-stuck/` | **decides & proceeds (auto-requeues if truly stuck)** |
 | Isolation | current tree | current tree | **`chaos/TKT-NNN` worktree per ticket** |
-| Ends at | you move it | `5-validating/` | **`5-validating/`, branch pushed, never merged** |
+| Ends at | you move it | `5-validating/` | **merged to `main` (clean) / `/chaos-land` (conflict); branch kept** |
 | Start it | just work | the flow-gate | **`/chaos` arming ceremony only** |
 
 **Chaos mode** (`/chaos`) is fully autonomous — no human in the loop. A background
 supervisor drains the backlog, running a fresh `claude -p` per ticket in its own git
-worktree, self-deliberating on technical decisions (competing viewpoint subagents →
-best-practice pick → documented), and landing each ticket in `5-validating/` on a
-pushed branch for your review. It **never merges to main** — you approve by moving a
-ticket to `6-complete/` (or run `/chaos-land`), which merges the branch. When the
+worktree, deciding every implementation *and* product call itself (competing viewpoint
+subagents → best-practice pick → documented), and **merging each validated, conflict-free
+ticket into `main` and pushing as it goes**. Landing happens in small continuous batches, so
+dependents see their prerequisites on `main` and overlapping conflicts are rare; a branch
+that *does* conflict is flagged and deferred to **`/chaos-land`**, which resolves the pile
+autonomously. Every `chaos/TKT-NNN` branch is preserved, so any landing is revertible. When the
 backlog drains it rotates through its **scouts** — `feature-scout` invents features,
 `ux-audit` and `a11y-audit` propose improvements to what already exists — and keeps going,
 so the run caps and the usage throttle (pause at 90% of the 5-hour window) are the only brakes.
@@ -125,9 +127,13 @@ pieces), and contract-establishing tickets run one at a time.
 
 > ⚠ Chaos requires a **Claude Max** subscription (each ticket runs Opus 4.8 at `xhigh`
 > under a usage throttle) and is **experimental** — autonomous coding agents have wiped
-> production databases. Its safety rests on three guarantees: branch-only/never-main,
-> everything lands in `5-validating/` for review, and nothing arms without the explicit
-> `arm chaos` confirmation. Stop a run anytime with `/chaos stop` or `touch .tickets/STOP`.
+> production databases. **It pushes to `main` automatically.** Its safety rests on: only
+> `chaos/*` branches are touched and only *clean* merges land automatically (conflicts are
+> deferred to `/chaos-land`, never blind-resolved); every landed branch is preserved so any
+> landing is revertible; the `chaos-guard` hook blocks history rewrites / force-pushes /
+> destructive ops; and nothing arms without the explicit `arm chaos` confirmation. Set
+> `land_during_run: false` for the old review-gated behavior (work waits in `5-validating/`).
+> Stop a run anytime with `/chaos stop` or `touch .tickets/STOP`.
 
 ### Ideation vs. minimalism (the ponytail boundary)
 

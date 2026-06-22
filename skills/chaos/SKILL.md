@@ -13,7 +13,7 @@ kind: workflow
 
 # Chaos mode
 
-> ⚠ **EXPERIMENTAL — fully autonomous, no human in the loop.** Chaos amplifies every risk in the `ticket-manager` EXPERIMENTAL warning (autonomous coding agents have wiped production databases). Its safety rests on three guarantees you must never weaken: work happens only on `chaos/TKT-NNN` branches and is **never merged to main autonomously**; every ticket ends in **`5-validating/` for human review**; and **nothing arms without the explicit ceremony below**.
+> ⚠ **EXPERIMENTAL — fully autonomous, no human in the loop, and it lands to `main`.** Chaos amplifies every risk in the `ticket-manager` EXPERIMENTAL warning (autonomous coding agents have wiped production databases). At the user's direction it now **merges validated work into `main` automatically as it runs** (pushing to origin) and decides every implementation *and* product call itself — so its safety rests on these guarantees you must never weaken: work happens only on `chaos/TKT-NNN` branches; **only cleanly-mergeable work lands automatically** — a conflict is flagged and deferred to `/chaos-land`, never blind-resolved by the loop; **every landed branch is preserved** (never auto-deleted) so any landing is revertible; the `chaos-guard` hook still blocks history rewrites, force-pushes, branch/Db/infra destruction; and **nothing arms without the explicit ceremony below**. (Set `land_during_run: false` in config for the old review-gated behavior — work then waits in `5-validating/` and lands only via `/chaos-land`.)
 
 ## The three execution modes
 
@@ -21,10 +21,10 @@ kind: workflow
 |---|---|---|---|
 | Human gates | every step | once (commit) | **zero** |
 | Entry | flow-gate | flow-gate | **`/chaos` arming ceremony only** |
-| When stuck | — | wait in `2-stuck/` | **deliberate, or skip** |
+| When stuck | — | wait in `2-stuck/` | **decide & proceed (auto-requeue if truly stuck)** |
 | Driver | interactive | foreground `run-stack` | **background supervisor + fresh `claude -p` per ticket** |
 | Isolation | current tree | current tree | **`chaos/TKT-NNN` worktree per ticket** |
-| Terminal state | user moves | `5-validating/` | **`5-validating/`, branch pushed, never merged** |
+| Terminal state | user moves | `5-validating/` | **merged to `main` (clean) / deferred to `/chaos-land` (conflict); branch always kept** |
 
 Chaos is a **sibling** of the flow-gate modes, not reachable through it. The `ticket-manager` flow-gate redirects any "chaos" request here.
 
@@ -41,8 +41,8 @@ The ONLY way to start chaos. **Default-deny** on anything short of the exact tok
 1. **Preview.** Run `bun .weave/scripts/chaos-eligible.ts` and show eligible tickets (id · priority · complexity). Show caps from `.weave/cache/chaos/config.json` (defaults: `max_tickets` 10, `max_parallel` 3, pause@90%/5h, `max_adrs` 3, `generate_when_dry` on).
 2. **Pre-flight** (report each result):
    - **Usage signal** — read `~/.claude/.weave-usage-snapshot.json`. Missing/stale → warn the proactive throttle is blind (reactive backoff only); offer to wire the tee: point `statusLine.command` at `chaos-statusline-snapshot.ts` wrapping the user's existing statusline (reversible on stop).
-   - **Git** — `git remote get-url origin` and push perms present? If not and `push_to_remote`, warn branches stay local.
-3. **Spell it out, verbatim:** "Chaos will run autonomously with **no further prompts**. It builds up to `<max_tickets>` tickets (when the backlog drains it runs its **scout rotation** — feature-scout invents features, ux-audit / a11y-audit propose improvements to what exists), each on a `chaos/TKT-NNN` branch pushed to origin, landing in `5-validating/`. It will **not** merge to main. Stop anytime: `/chaos stop` or `touch .tickets/STOP`."
+   - **Git** — `git remote get-url origin` and push perms present? If not and `push_to_remote`, warn branches stay local **and nothing lands** (auto-landing needs to push `main`). Confirm the current `main` is in a state the user is willing to have committed onto.
+3. **Spell it out, verbatim:** "Chaos will run autonomously with **no further prompts** and **will push commits to `main`**. It builds up to `<max_tickets>` tickets (when the backlog drains it runs its **scout rotation** — feature-scout invents features, ux-audit / a11y-audit propose improvements), each on a `chaos/TKT-NNN` branch, and **automatically merges validated, conflict-free work into `main` and pushes to origin as it goes** — deciding every implementation and product call itself. Every branch is preserved, so you can `git revert`/reset any landing. A branch that conflicts on merge is left flagged for you to land later with `/chaos-land`. Stop anytime: `/chaos stop` or `touch .tickets/STOP`."
 4. **Require the token.** Ask the user to type exactly **`arm chaos`**. Anything else → do not start. Re-ask once on an ambiguous reply, then abort. Never infer intent.
 5. **Launch detached** (the supervisor writes the `.chaos-active` flag + run record itself):
    ```bash
@@ -88,4 +88,6 @@ Each worker has fresh context, so architecture is kept coherent by **externalizi
 
 ## Reviewing a run (human, later)
 
-Open `.tickets/chaos-runs/run-<id>.md`: every built ticket sits in `5-validating/` with its decision blocks/ADRs, on a pushed `chaos/TKT-NNN` branch. **Approve by moving a ticket to `6-complete/`** (one at a time on the board, or `/chaos-land` for all) — approved branches merge to main via the reconciler. Anything you don't approve, send back.
+By default (`land_during_run: true`) chaos **lands as it runs**: the supervisor's `landAndHeal` step auto-approves each validated ticket (`5-validating → 6-complete`) and merges its clean branch into `main`, so review is **post-hoc**. Open `.tickets/chaos-runs/run-<id>.md` for the per-ticket decision blocks/ADRs, then review the merges on `main` (each lands as a `chaos: land TKT-NNN` merge commit). To undo a landing, the `chaos/TKT-NNN` branch is always preserved — `git revert -m 1 <merge_commit>` or reset. Because landing happens in **small, continuous batches** (each new worktree forks from a `main` that already has the prior work), overlapping conflicts are rare; any branch that *does* conflict is left in `6-complete/` flagged `merge_conflict: true` and **deferred to `/chaos-land`**, which resolves the pile autonomously with its best attempt (no human input) and pushes. The supervisor also **auto-requeues stuck tickets** (up to `max_unstick_retries`) to rebuild on the richer main, so a `2-stuck/` pile heals itself.
+
+For a **review-gated** run instead, set `land_during_run: false`: work then accumulates in `5-validating/`, nothing touches `main` automatically, and you land approved tickets yourself with `/chaos-land` (still autonomous on conflicts) or by moving them to `6-complete/` one at a time.
