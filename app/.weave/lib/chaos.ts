@@ -89,6 +89,7 @@ export type ChaosConfig = {
   auto_merge_on_complete: boolean;
   resolve_conflicts_with_claude: boolean;
   land_during_run: boolean; // supervisor lands clean work to main each loop (deps flow → dependents unblock); conflicts deferred to /chaos-land
+  linear_history: boolean; // land via fast-forward (no merge commits) → a single linear history on main; falls back to a merge only if a branch diverged
   max_unstick_retries: number; // auto-requeue a stuck ticket this many times before leaving it for a human
   merge_target: string; // branch approved work merges into ("" → detect default)
   delete_branch_after_merge: boolean;
@@ -100,7 +101,7 @@ export const DEFAULT_CONFIG: ChaosConfig = {
   max_tickets: 10,
   max_wall_clock_min: 240,
   max_adrs: 3,
-  max_parallel: 3,
+  max_parallel: 1, // SERIAL by default: each ticket builds on a main that already has every prior landed ticket → clean fast-forward landings, single linear history. Raise to parallelise (conflicts then possible).
   per_ticket_deliberation_cap: 4,
   pause_five_hour_pct: 90,
   pause_seven_day_pct: 90,
@@ -110,13 +111,14 @@ export const DEFAULT_CONFIG: ChaosConfig = {
   decompose_xl: true,
   model: "claude-opus-4-8",
   effort: "xhigh",
-  generate_when_dry: true,
+  generate_when_dry: false, // bare mode: drain the backlog to main and finish, rather than inventing more work when dry. Set true to re-enable the self-sustaining scout rotation.
   scouts: ["feature-scout", "ux-audit", "a11y-audit"],
   max_generated_features: 5,
   min_feature_score: 60,
   auto_merge_on_complete: true,
   resolve_conflicts_with_claude: true,
   land_during_run: true,
+  linear_history: true,
   max_unstick_retries: 3,
   merge_target: "",
   delete_branch_after_merge: false,

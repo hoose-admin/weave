@@ -112,11 +112,12 @@ There are three ways to drive a ticket from backlog to done, in increasing auton
 **Chaos mode** (`/chaos`) is fully autonomous — no human in the loop. A background
 supervisor drains the backlog, running a fresh `claude -p` per ticket in its own git
 worktree, deciding every implementation *and* product call itself (competing viewpoint
-subagents → best-practice pick → documented), and **merging each validated, conflict-free
-ticket into `main` and pushing as it goes**. Landing happens in small continuous batches, so
-dependents see their prerequisites on `main` and overlapping conflicts are rare; a branch
-that *does* conflict is flagged and deferred to **`/chaos-land`**, which resolves the pile
-autonomously. Every `chaos/TKT-NNN` branch is preserved, so any landing is revertible. When the
+subagents → best-practice pick → documented), and **building one ticket at a time and
+fast-forwarding each validated ticket into `main` as it goes — a single linear history, one
+commit per ticket, pushed to origin**. Because it's serial, each ticket builds on a `main`
+that already has all the prior work, so landings stay clean; a branch that *does* conflict
+(rare) is flagged and deferred to **`/chaos-land`**, which resolves the pile autonomously.
+Every `chaos/TKT-NNN` branch is preserved, so any landing is revertible. When the
 backlog drains it rotates through its **scouts** — `feature-scout` invents features,
 `ux-audit` and `a11y-audit` propose improvements to what already exists — and keeps going,
 so the run caps and the usage throttle (pause at 90% of the 5-hour window) are the only brakes.
