@@ -112,12 +112,12 @@ function guardHookPath(): string | null {
 }
 
 function workerSettingsArgs(): string[] {
-  // Both of these ride the worker's `--settings` so neither depends on the target
-  // having merged weave's perms (merge-settings only merges permissions.allow with
-  // --git-perms) or on the worktree carrying a .claude/ (it doesn't):
-  //   • permissions.allow — let the worker run the smoke harness; acceptEdits
-  //     DENIES non-allowlisted Bash in headless `-p` (no prompt to grant it).
-  //   • the chaos-guard PreToolUse hook — so its regex repo-scoping checks run.
+  // The chaos-guard PreToolUse hook rides the worker's `--settings` because the
+  // worktree carries no `.claude/`. This is the REAL enforcement layer under
+  // `bypassPermissions`: the docs confirm PreToolUse hooks still fire and a
+  // `deny` decision blocks the tool even in bypass mode. (The `permissions.allow`
+  // entry is a no-op under bypass — allow rules have no effect there — but is
+  // kept so the smoke harness still works if anyone switches back to acceptEdits.)
   const settings: Record<string, unknown> = {
     permissions: { allow: ["Bash(bun run smoke:*)", "Bash(bun .weave/scripts/smoke.ts:*)"] },
   };
@@ -275,8 +275,17 @@ async function runWorkerAsync(ticketId: string, worktree: string, cfg: ChaosConf
       cfg.effort,
       "--max-budget-usd",
       String(cfg.max_budget_usd_per_ticket),
+      // bypassPermissions, NOT acceptEdits: headless `-p` has no human to approve
+      // a prompt, so under acceptEdits any Bash outside the allow list (build,
+      // test, typecheck, install — and on non-JS projects there's no way to
+      // enumerate them) is auto-denied and the worker can't actually verify its
+      // work → every ticket stalls at the test gate. bypass lets it run the
+      // project's real toolchain; the rails that DON'T impede dev still hold:
+      // `--disallowedTools` deny rules apply in every mode (git push/commit,
+      // global installs, rm stay blocked) and the injected chaos-guard PreToolUse
+      // hook still fires + can deny (force-push/push-main/destructive/out-of-repo).
       "--permission-mode",
-      "acceptEdits",
+      "bypassPermissions",
       "--output-format",
       "json",
       "--disallowedTools",
@@ -328,7 +337,7 @@ function runScout(skill: string, cap: number, runId: string, cfg: ChaosConfig): 
       "--max-budget-usd",
       String(cfg.max_budget_usd_per_ticket),
       "--permission-mode",
-      "acceptEdits",
+      "bypassPermissions", // same rationale as the worker (see runWorkerAsync)
       "--disallowedTools",
       WORKER_DENY.join(" "),
       ...workerSettingsArgs(),
@@ -472,19 +481,28 @@ async function launchWorker(next: Eligible, runId: string, cfg: ChaosConfig): Pr
   const wt = createWorktree(next.id, cfg);
   if (!wt) return err("worktree creation failed");
 
-  const res = await runWorkerAsync(next.id, wt.path, cfg, runId);
-  if (res.rateLimited) {
-    removeWorktree(wt.path);
-    deleteEmptyBranch(wt.branch); // bailing on a rate-limit must not leave debris
-    return err("interrupted by rate-limit", true);
+  // A throw anywhere on the worker path (spawn, settle, a git hiccup) must NEVER
+  // reject this promise: it's awaited via Promise.race in the loop, so a
+  // rejection would crash the whole supervisor and need a manual resume. Catch
+  // it, record a ticket error (the attempt counter retries), keep the run alive.
+  try {
+    const res = await runWorkerAsync(next.id, wt.path, cfg, runId);
+    if (res.rateLimited) {
+      removeWorktree(wt.path);
+      deleteEmptyBranch(wt.branch); // bailing on a rate-limit must not leave debris
+      return err("interrupted by rate-limit", true);
+    }
+    if (res.code !== 0) log(`worker ${next.id} exited ${res.code}${res.detail ? `: ${res.detail}` : ""}`);
+    const processed = await settle(next.id, next.title, wt, cfg, res);
+    removeWorktree(wt.path); // the worktree dir is always disposable
+    // Only a real validating build keeps its branch; every other outcome deletes
+    // the (commit-free) branch the worktree created, so failures leave no debris.
+    if (processed.outcome !== "validating") deleteEmptyBranch(wt.branch);
+    return { processed, rateLimited: false };
+  } catch (e) {
+    try { removeWorktree(wt.path); } catch { /* best-effort */ }
+    return err(`worker path errored: ${(e as Error).message}`);
   }
-  if (res.code !== 0) log(`worker ${next.id} exited ${res.code}${res.detail ? `: ${res.detail}` : ""}`);
-  const processed = await settle(next.id, next.title, wt, cfg, res);
-  removeWorktree(wt.path); // the worktree dir is always disposable
-  // Only a real validating build keeps its branch; every other outcome deletes
-  // the (commit-free) branch the worktree created, so failures leave no debris.
-  if (processed.outcome !== "validating") deleteEmptyBranch(wt.branch);
-  return { processed, rateLimited: false };
 }
 
 // ── the loop ─────────────────────────────────────────────────────────────────
@@ -550,20 +568,22 @@ async function landAndHeal(cfg: ChaosConfig, inFlight: Set<string>, attempts: Ma
     log(`reconcile failed: ${(e as Error).message}`);
   }
 
-  // 3. capped auto-unstick → rebuild on the richer main
+  // 3. capped auto-unstick → rebuild on the richer main. The whole iteration is
+  //    wrapped so a single unreadable/unwritable ticket can't throw out of the
+  //    heal pass (which is awaited in the loop) and crash the supervisor.
   for (const t of await listBucket("2-stuck")) {
     if (inFlight.has(t.id)) continue;
-    const full = await readTicket(t.id);
-    if (!full) continue;
-    const n = Number(full.frontmatter.chaos_unstick_count ?? 0);
-    if (n >= cfg.max_unstick_retries) continue; // genuinely hopeless — leave it for a human
-    git(["branch", "-D", chaosBranch(t.id)]); // drop the abandoned branch; the rebuild makes a fresh one
-    full.frontmatter.chaos_unstick_count = String(n + 1);
-    for (const k of ["merge_conflict", "chaos_branch", "merged", "merge_commit", "completed", "test_failed", "validation_failed"]) {
-      delete full.frontmatter[k];
-    }
-    await writeTicket(t.id, full.frontmatter, stripSection(full.body, "Stuck Reason"));
     try {
+      const full = await readTicket(t.id);
+      if (!full) continue;
+      const n = Number(full.frontmatter.chaos_unstick_count ?? 0);
+      if (n >= cfg.max_unstick_retries) continue; // genuinely hopeless — leave it for a human
+      git(["branch", "-D", chaosBranch(t.id)]); // drop the abandoned branch; the rebuild makes a fresh one
+      full.frontmatter.chaos_unstick_count = String(n + 1);
+      for (const k of ["merge_conflict", "chaos_branch", "merged", "merge_commit", "completed", "test_failed", "validation_failed"]) {
+        delete full.frontmatter[k];
+      }
+      await writeTicket(t.id, full.frontmatter, stripSection(full.body, "Stuck Reason"));
       await moveTicket(t.id, "0-backlog");
       attempts.delete(t.id); // fresh per-run attempt budget for the rebuild
       log(`unstuck ${t.id} → backlog (retry ${n + 1}/${cfg.max_unstick_retries})`);
