@@ -29,6 +29,7 @@ import { basename, join } from "node:path";
 import { REPO_ROOT, TICKETS_ROOT } from "../weave.config.ts";
 import { listBucket, moveTicket, readTicket, writeTicket } from "../lib/tickets.ts";
 import { mergeTarget, reconcile } from "../lib/chaos-merge.ts";
+import { syncBoardSafe } from "../lib/firestore.ts";
 import {
   type ChaosConfig,
   type ChaosRun,
@@ -629,6 +630,9 @@ async function main(): Promise<void> {
     // so dependents see their prereqs on main and a fixable stuck pile doesn't
     // trigger a premature "backlog dry" finalize. Skipped while halting.
     if (!stopping) await landAndHeal(cfg, new Set(active.keys()), attempts);
+    // Mirror the board to Firestore if enabled — fire-and-forget + throttled; a
+    // convergence backstop (per-ticket moves already sync live via moveTicket).
+    void syncBoardSafe({ minIntervalMs: 15_000 });
 
     if (active.size === 0) {
       if (stopping) return finalize(run, "halted", ".tickets/STOP present");

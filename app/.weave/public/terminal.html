@@ -26,7 +26,34 @@
         <!-- weave:navbar active="terminal" -->
         <main class="terminal-page">
             <aside class="term-sidebar">
-                <div class="term-sidebar-head">
+                <div class="term-toolbar">
+                    <button type="button" id="term-new" class="term-btn" title="New terminal">
+                        <span class="term-new-icon" aria-hidden="true">+</span>
+                        <span class="term-new-text">Terminal</span>
+                    </button>
+                    <button
+                        type="button"
+                        id="term-utils-toggle"
+                        class="term-tool-btn term-caret-btn term-utils-toggle"
+                        title="Utilities"
+                        aria-label="Utilities"
+                        aria-haspopup="true"
+                        aria-expanded="false"
+                        aria-controls="term-utils"
+                    >
+                        <span class="term-utils-caret" aria-hidden="true">⌄</span>
+                    </button>
+                    <button
+                        type="button"
+                        id="term-collapse"
+                        class="term-tool-btn term-caret-btn term-collapse"
+                        title="Collapse sidebar"
+                        aria-label="Collapse sidebar"
+                    >
+                        <span class="term-collapse-icon" aria-hidden="true">‹</span>
+                    </button>
+                </div>
+                <div class="term-utils" id="term-utils" hidden>
                     <div class="term-bar-row3">
                         <label class="term-scheme-label" for="term-scheme">theme</label>
                         <select
@@ -35,17 +62,6 @@
                             title="Terminal color scheme"
                         ></select>
                     </div>
-                    <button
-                        type="button"
-                        id="term-collapse"
-                        class="term-collapse"
-                        title="Collapse sidebar"
-                        aria-label="Collapse sidebar"
-                    >
-                        <span class="term-collapse-icon" aria-hidden="true">‹</span>
-                    </button>
-                </div>
-                <div class="term-bar">
                     <form id="term-cwd-form" class="term-cwd-form">
                         <input
                             type="text"
@@ -57,10 +73,16 @@
                         />
                         <button type="submit" class="term-btn">save</button>
                     </form>
-                    <div class="term-bar-row2">
-                        <button type="button" id="term-new" class="term-btn" title="New terminal">
-                            <span class="term-new-icon" aria-hidden="true">+</span>
-                            <span class="term-new-text">Terminal</span>
+                    <div class="term-utils-row">
+                        <button
+                            type="button"
+                            id="term-tips"
+                            class="term-tips-btn"
+                            title="Vim tips"
+                            aria-label="Vim tips"
+                        >
+                            <span class="term-tips-icon" aria-hidden="true">💡</span>
+                            <span class="term-tips-text">Tips</span>
                         </button>
                         <span id="term-cwd-saved" class="term-cwd-saved" hidden>saved ✓</span>
                     </div>
@@ -78,6 +100,93 @@
                 </div>
             </section>
         </main>
+
+        <!-- Vim tips modal: toggled by #term-tips, wired in terminal.js. -->
+        <div class="modal" id="term-tips-modal" hidden>
+            <div class="modal-backdrop" data-modal-close></div>
+            <div class="modal-card term-tips-card">
+                <header class="modal-head">
+                    <h3>Vim quick reference</h3>
+                    <button
+                        type="button"
+                        class="close-btn"
+                        data-modal-close
+                        aria-label="Close"
+                    >
+                        ×
+                    </button>
+                </header>
+
+                <div class="modal-body term-tips-body">
+                    <div class="term-tips-hero">
+                        <code class="term-tips-key">:Ex</code>
+                        <div class="term-tips-hero-text">
+                            Open the built-in file explorer (netrw) — use this
+                            instead of a file browser to navigate and open files
+                            right inside the terminal. <code>:Ex .</code> opens
+                            the current dir; <kbd>Enter</kbd> opens a file,
+                            <kbd>-</kbd> goes up a level.
+                        </div>
+                    </div>
+
+                    <section class="term-tips-section">
+                        <h4 class="term-tips-h">Files &amp; windows</h4>
+                        <ul class="term-tips-list">
+                            <li><code>:e file</code><span>open / edit a file</span></li>
+                            <li><code>:w</code><span>save (write)</span></li>
+                            <li><code>:wq</code> / <code>ZZ</code><span>save &amp; quit</span></li>
+                            <li><code>:q</code> / <code>:q!</code><span>quit / force quit</span></li>
+                            <li><code>:sp</code> / <code>:vs</code><span>split horizontal / vertical</span></li>
+                            <li><code>Ctrl-w w</code><span>jump between splits</span></li>
+                        </ul>
+                    </section>
+
+                    <section class="term-tips-section">
+                        <h4 class="term-tips-h">Editing</h4>
+                        <ul class="term-tips-list">
+                            <li><code>i</code> / <code>a</code><span>insert / append</span></li>
+                            <li><kbd>Esc</kbd><span>back to normal mode</span></li>
+                            <li><code>dd</code><span>delete line</span></li>
+                            <li><code>yy</code> / <code>p</code><span>yank line / paste</span></li>
+                            <li><code>u</code> / <code>Ctrl-r</code><span>undo / redo</span></li>
+                        </ul>
+                    </section>
+
+                    <section class="term-tips-section">
+                        <h4 class="term-tips-h">Move &amp; search</h4>
+                        <ul class="term-tips-list">
+                            <li><code>gg</code> / <code>G</code><span>top / bottom of file</span></li>
+                            <li><code>0</code> / <code>$</code><span>start / end of line</span></li>
+                            <li><code>/text</code> then <kbd>n</kbd><span>search, next match</span></li>
+                            <li><code>:%s/old/new/g</code><span>replace all</span></li>
+                        </ul>
+                    </section>
+
+                    <section class="term-tips-section">
+                        <h4 class="term-tips-h">
+                            Search all files (VSCode ⌘⇧F)
+                        </h4>
+                        <ul class="term-tips-list">
+                            <li><code>:vimgrep /text/ **/*</code><span>recursive project search</span></li>
+                            <li><code>:copen</code><span>open results list</span></li>
+                            <li><code>:cn</code> / <code>:cp</code><span>next / prev match</span></li>
+                            <li><code>:grep -r text .</code><span>same, via external grep</span></li>
+                        </ul>
+                    </section>
+                </div>
+
+                <footer class="modal-foot">
+                    <button
+                        type="button"
+                        class="btn btn--secondary"
+                        data-modal-close
+                    >
+                        Close
+                    </button>
+                </footer>
+            </div>
+        </div>
+
         <!-- weave:howto-modal -->
 
         <!-- Scheme registry (classic, runs before the deferred modules) so

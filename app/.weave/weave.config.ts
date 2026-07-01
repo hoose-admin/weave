@@ -11,7 +11,7 @@
 // can also run against a ticket store / repo located elsewhere (sidecar, CI,
 // tests).
 
-import { join, isAbsolute } from "node:path";
+import { join, isAbsolute, basename } from "node:path";
 import { readFileSync } from "node:fs";
 
 const HERE = import.meta.dir; // <repo>/.weave
@@ -40,12 +40,24 @@ type SmokeConfigFile = {
   viewport?: { width: number; height: number };
 };
 
+// Raw `firestore` block as it appears in weave.config.json (all optional). Absent
+// or missing `projectId` ⇒ the Firestore mirror is off for this repo. Credentials
+// are NEVER here — they come from local Application Default Credentials at runtime.
+type FirestoreConfigFile = {
+  projectId?: string; // REQUIRED to enable — your GCP project id.
+  database?: string; // Firestore database id (default "(default)")
+  collection?: string; // top-level collection for ticket docs (default "weave_tickets")
+  board?: string; // namespace so one database can serve many repos (default: repo dir name)
+  prune?: boolean; // delete remote docs whose ticket file is gone (default false)
+};
+
 type ConfigFile = {
   repoRoot?: string;
   ticketsRoot?: string;
   adrsRoot?: string;
   port?: number;
   smoke?: SmokeConfigFile;
+  firestore?: FirestoreConfigFile;
 };
 
 function loadConfigFile(repoRoot: string): ConfigFile {
@@ -150,3 +162,38 @@ export const SMOKE_ARTIFACTS_DIR: string = join(REPO_ROOT, ".weave", "cache", "s
 // Dedicated free-port range for smoke app-boots — non-overlapping with the
 // terminal allocator's 7700–7799 so the two never contend.
 export const SMOKE_PORT_RANGE = { start: 5800, end: 5899 } as const;
+
+// ── Firestore mirror ─────────────────────────────────────────────────────────
+// Optional: mirror the ticket board into a Firestore collection so status can be
+// watched from outside the repo (see lib/firestore.ts). Resolved here — like
+// SMOKE — so the sync core, the CLI, and the reconcile triggers share one source
+// of truth. Null (feature off, the no-op path) unless a `firestore` block declares
+// a projectId. Credentials come from local ADC at runtime — never from config/git.
+
+export type FirestoreConfig = {
+  projectId: string;
+  database: string;
+  collection: string;
+  board: string;
+  prune: boolean;
+};
+
+export const FIRESTORE: FirestoreConfig | null = (() => {
+  const f = cfg.firestore;
+  if (!f || typeof f.projectId !== "string" || !f.projectId.trim()) return null;
+  return {
+    projectId: f.projectId.trim(),
+    database: (f.database && f.database.trim()) || "(default)",
+    collection: (f.collection && f.collection.trim()) || "weave_tickets",
+    board: (f.board && f.board.trim()) || basename(REPO_ROOT),
+    prune: f.prune === true,
+  };
+})();
+
+// Machine-local sync state (token cache, per-doc content hashes, log) under
+// .weave/cache/ (gitignored), REPO_ROOT-anchored so chaos worktrees share the
+// root repo's token + hash cache rather than re-minting per worktree.
+export const FIRESTORE_CACHE_DIR: string = join(REPO_ROOT, ".weave", "cache", "firestore");
+export const FIRESTORE_LOG: string = join(FIRESTORE_CACHE_DIR, "sync.log");
+export const FIRESTORE_TOKEN_CACHE: string = join(FIRESTORE_CACHE_DIR, "token.json");
+export const FIRESTORE_SYNC_STATE: string = join(FIRESTORE_CACHE_DIR, "sync-state.json");

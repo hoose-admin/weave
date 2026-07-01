@@ -32,12 +32,22 @@ const PORT_MAX = 7799;
 export type TermSession = {
   id: string;
   title: string;
+  // User-set tab name (via the rename UI). When present it wins over the
+  // auto last-command / dir-basename display title. Absent → auto title.
+  customTitle?: string;
   cwd: string;
   port: number;
   pid: number;
   tmux: string;
   createdAt: string;
+  // Manual vertical position in the tab list, set by drag-to-reorder. Unset
+  // sorts after ordered tabs, by createdAt (so a fresh tab lands at the bottom).
+  order?: number;
 };
+
+// The last-command shell hook, sourced once into each session's shell so it
+// records every command line to <id>.cmd (read by readLastCommand for the tab title).
+const CMD_HOOK_PATH = join(import.meta.dir, "weave-cmd-hook.sh");
 
 // ── Record IO ─────────────────────────────────────────────────────────────
 
@@ -256,6 +266,26 @@ async function sendKeys(tmuxName: string, line: string): Promise<void> {
   }
 }
 
+// Source the last-command hook into the session's interactive shell, then clear
+// the screen so the pane opens clean. Sourced AFTER the WEAVE_* session env is set
+// (so the hook sees WEAVE_TERM_ID/DIR) and BEFORE any startup command (so that
+// command becomes the first captured "last command"). Only on create — like the
+// startup command, re-sourcing in reconcile() would disrupt a running session.
+async function sourceCmdHook(tmuxName: string): Promise<void> {
+  if (!Bun.which("tmux") || !existsSync(CMD_HOOK_PATH)) return;
+  const quoted = `'${CMD_HOOK_PATH.replace(/'/g, `'\\''`)}'`;
+  await sendKeys(tmuxName, `source ${quoted}`);
+  try {
+    // C-l redraws the pane with just the fresh prompt at top, hiding the setup line.
+    await Bun.spawn(["tmux", "send-keys", "-t", tmuxName, "C-l"], {
+      stdout: "ignore",
+      stderr: "ignore",
+    }).exited;
+  } catch {
+    /* best-effort — the source line just stays visible at the top */
+  }
+}
+
 // ── Live status (hook-written) ──────────────────────────────────────────────
 
 export type TermLive = {
@@ -278,10 +308,24 @@ export async function readLive(id: string): Promise<TermLive | null> {
 }
 
 async function removeLive(id: string): Promise<void> {
+  for (const f of [`${id}.json`, `${id}.cmd`]) {
+    try {
+      await unlink(join(LIVE_DIR, f));
+    } catch {
+      /* already gone / never existed */
+    }
+  }
+}
+
+// The last command run in this terminal, written by weave-cmd-hook.sh's preexec
+// hook. Whitespace-collapsed and length-capped for a tab label; null if the shell
+// hasn't run a command yet (or isn't a weave-hooked shell).
+export async function readLastCommand(id: string): Promise<string | null> {
   try {
-    await unlink(join(LIVE_DIR, `${id}.json`));
+    const s = (await readFile(join(LIVE_DIR, `${id}.cmd`), "utf8")).replace(/\s+/g, " ").trim();
+    return s ? s.slice(0, 80) : null;
   } catch {
-    /* already gone / never existed */
+    return null;
   }
 }
 
@@ -312,7 +356,11 @@ export async function listSessions(): Promise<Array<TermSession & { alive: boole
     await removeRecord(r.id);
     await removeLive(r.id);
   }
-  out.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  out.sort((a, b) => {
+    const ao = a.order ?? Number.MAX_SAFE_INTEGER;
+    const bo = b.order ?? Number.MAX_SAFE_INTEGER;
+    return ao - bo || a.createdAt.localeCompare(b.createdAt);
+  });
   return out;
 }
 
@@ -351,6 +399,7 @@ export async function createSession(opts: { cwd?: string; title?: string; comman
   }
   await applySessionOptions(tmux); // the session now exists — make the wheel scroll
   await applySessionEnv(tmux, id); // let the hook find this terminal's live file
+  await sourceCmdHook(tmux); // record each command for the tab's last-command label
   // Auto-run a startup command (e.g. a forked `claude --resume … --fork-session`)
   // in the session's shell. ONLY here — never in reconcile(), which respawns ttyd
   // against a session whose command is already running (re-sending would double it).
@@ -380,6 +429,32 @@ export async function killSession(id: string): Promise<{ ok: true }> {
   await removeRecord(id);
   await removeLive(id);
   return { ok: true };
+}
+
+// Set (or clear, with an empty string) the user-chosen tab name. A custom name
+// overrides the auto last-command / dir-basename title in the dashboard.
+export async function renameSession(id: string, title: string): Promise<TermSession | null> {
+  const r = await readRecord(id);
+  if (!r) return null;
+  const t = title.trim().slice(0, 60);
+  if (t) r.customTitle = t;
+  else delete r.customTitle;
+  await writeRecord(r);
+  return r;
+}
+
+// Persist the tab list's vertical order. `ids` is the new top-to-bottom order
+// from the dashboard's drag-reorder; each listed session's `order` is set to its
+// index. Records not in `ids` (or already at that index) are left untouched, so
+// only what actually moved is rewritten.
+export async function reorderSessions(ids: string[]): Promise<void> {
+  const pos = new Map(ids.map((id, i) => [id, i]));
+  for (const r of await readAllRecords()) {
+    const p = pos.get(r.id);
+    if (p == null || r.order === p) continue;
+    r.order = p;
+    await writeRecord(r);
+  }
 }
 
 // Run at module load (and on every `bun --hot` reload). When ttyd processes

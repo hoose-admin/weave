@@ -42,6 +42,19 @@ export const STATUS_FOR_BUCKET: Record<Bucket, string> = {
   "7-archive": "Archived",
 };
 
+// ── optional Firestore mirror (see lib/firestore.ts) ─────────────────────────
+// Fire-and-forget: a LAZY dynamic import so read-only consumers of this module
+// never pull in firestore.ts, and the whole thing no-ops when no `firestore`
+// block is configured. Deliberately un-awaited — a ticket op must never wait on,
+// or fail because of, an external sync.
+function syncFire(id: string, kind: "upsert" | "delete" = "upsert"): void {
+  import("./firestore.ts")
+    .then((m) => (kind === "delete" ? m.deleteTicketDocSafe(id) : m.syncTicketSafe(id)))
+    .catch(() => {
+      /* the mirror is best-effort — never disturb the ticket op */
+    });
+}
+
 export type TicketSummary = {
   id: string;
   title: string;
@@ -200,6 +213,7 @@ export async function writeTicket(
   const tmp = found.path + ".tmp";
   await writeFile(tmp, serialized, "utf8");
   await rename(tmp, found.path);
+  syncFire(id);
 }
 
 export async function moveTicket(
@@ -230,6 +244,7 @@ export async function moveTicket(
   // remove the old file (use rename to same dir? no — different dirs are fine via unlink-like)
   await (await import("node:fs/promises")).unlink(found.path);
 
+  syncFire(id);
   return { from: found.bucket, to: toBucket, path: destPath };
 }
 
@@ -264,6 +279,7 @@ export async function deleteTicket(id: string): Promise<{ path: string }> {
   const found = await findTicket(id);
   if (!found) throw new Error(`ticket ${id} not found`);
   await (await import("node:fs/promises")).unlink(found.path);
+  syncFire(id, "delete");
   return { path: found.path };
 }
 
@@ -347,6 +363,7 @@ export async function createTicket(input: CreateInput): Promise<TicketFull> {
   await writeFile(tmp, serialized, "utf8");
   await rename(tmp, destPath);
 
+  syncFire(id);
   const parsed = parse(serialized);
   const s = summary(parsed, filename, bucket);
   return { ...s, frontmatter: parsed.frontmatter, body: parsed.body };

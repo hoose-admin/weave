@@ -8,7 +8,8 @@
     "build:graphs": "bun lib/graphs/build-all.ts",
     "typecheck": "tsc --noEmit",
     "smoke": "bun run scripts/smoke.ts",
-    "install:browsers": "bun run scripts/install-browsers.ts"
+    "install:browsers": "bun run scripts/install-browsers.ts",
+    "firestore": "bun run scripts/firestore.ts"
   },
   "devDependencies": {
     "@types/bun": "latest",

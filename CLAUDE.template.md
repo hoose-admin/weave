@@ -35,6 +35,7 @@ Domains default to `app | infra | docs | meta` — rename them for your repo.
 | `bug-scan` | Multi-agent bug hunt → files verified findings as backlog tickets. |
 | `adr-manager` / `adr-researcher` | Create and research Architecture Decision Records (`.tickets/ADRs/`). |
 | `security` | Wraps the `/security-review` engine and composes findings into the board (dedup, severity, snapshot diff, auto-draft). |
+| `firestore` | *(optional)* Mirror ticket status to a Firestore collection so the board can be watched off-repo. Enable: `bun .weave/scripts/firestore.ts init --project <id>`. |
 | `skill-builder` / `skill-generator` / `skill-organizer` | Author, bootstrap, and curate your own skills. |
 
 ## The dashboard
@@ -64,3 +65,8 @@ disk are the source of truth. The dashboard never runs git.
      test-ticket gate then boots your app in a headless browser and fails on
      console errors / uncaught exceptions / stuck spinners — catching runtime
      breakage that unit tests miss. CLI/library? Omit it; smoke just no-ops. -->
+
+<!-- Want ticket status visible off-repo (phone, shared page, cron)? Enable the
+     optional Firestore mirror: `bun .weave/scripts/firestore.ts init --project
+     <gcp-id>` (needs a Firestore DB in Native mode + `gcloud auth application-
+     default login`). Status then syncs automatically. See the `firestore` skill. -->

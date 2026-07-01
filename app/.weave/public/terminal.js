@@ -25,19 +25,28 @@ const savedTag = document.getElementById("term-cwd-saved");
 const errEl = document.getElementById("term-bar-error");
 const collapseBtn = document.getElementById("term-collapse");
 const schemeSelect = document.getElementById("term-scheme");
+const tipsBtn = document.getElementById("term-tips");
+const tipsModal = document.getElementById("term-tips-modal");
+const utilsToggle = document.getElementById("term-utils-toggle");
+const utilsPanel = document.getElementById("term-utils");
 
 /** @type {Map<string, HTMLIFrameElement>} id -> iframe */
 const frames = new Map();
 let activeId = null;
 let savedTimer = null;
 let currentIdsKey = "";
+let draggingId = null; // id of the tab currently being drag-reordered, else null
 const prevStatus = new Map(); // id -> last raw status reported by the server
 const doneIds = new Set(); // background terminals that finished, awaiting a look
 const lastSummary = new Map(); // id -> last non-null summary (shown on the "done" badge)
 const dismissedNotif = new Map(); // id -> notification.id the user has dismissed
 let lastSessions = []; // most recent /api/terminals payload (so switching tabs can re-render the notif)
 
-const idsKey = (sessions) => sessions.map((s) => s.id).join(",");
+// Set-identity key (sorted) — decides ONLY whether a poll must rebuild the list
+// (a tab was added/removed). It's deliberately order-insensitive: a pure drag
+// reorder keeps the same set, so the poll patches in place and preserves the
+// user's DOM order instead of snapping back to the server's order.
+const idsKey = (sessions) => sessions.map((s) => s.id).sort().join(",");
 
 // Hydrate the saved default working directory into the bar.
 try {
@@ -113,6 +122,10 @@ function ensureFrame(s) {
         f.className = "term-frame";
         // weave's own client (not ttyd's bundled page) so we can remap keys;
         // it's same-origin and connects a WebSocket to this session's ttyd port.
+        // clipboard-* in `allow` grants the frame's copy path (terminal-xterm.js)
+        // permission-policy access so Cmd+C / copy-on-select can reach the system
+        // clipboard in every browser, not just same-origin-default Chrome.
+        f.allow = "clipboard-read; clipboard-write";
         f.src = `/terminal-xterm.html?port=${encodeURIComponent(s.port)}`;
         f.title = s.title;
         f.hidden = true;
@@ -198,6 +211,84 @@ function renderNotif(sessions) {
     layer.hidden = false;
 }
 
+// ── drag-to-reorder ───────────────────────────────────────────────────────────
+
+// Make a whole tab draggable for vertical reorder. dragstart marks it dragging
+// (its id drives the listEl-level dragover reordering); dragend clears the mark
+// and persists the new order. Drags that begin on the close slider, fork button,
+// or an open rename input are ignored so those controls keep their own behavior.
+function wireTabDrag(li, id) {
+    li.addEventListener("dragstart", (e) => {
+        if (e.target.closest(".term-item-close, .term-item-fork, .term-item-rename-input")) {
+            e.preventDefault();
+            return;
+        }
+        draggingId = id;
+        li.classList.add("dragging");
+        if (e.dataTransfer) {
+            e.dataTransfer.effectAllowed = "move";
+            try {
+                e.dataTransfer.setData("text/plain", id);
+            } catch {
+                /* setData unsupported — drag still works */
+            }
+        }
+    });
+    li.addEventListener("dragend", () => {
+        li.classList.remove("dragging");
+        draggingId = null;
+        persistOrder();
+    });
+}
+
+// The item the dragged row should sit BEFORE, given the pointer's Y — the first
+// tab whose vertical midpoint is below the cursor. null → drop at the end.
+function dragAfterElement(y) {
+    let closest = { offset: Number.NEGATIVE_INFINITY, el: null };
+    for (const child of listEl.querySelectorAll(".term-item:not(.dragging)")) {
+        const box = child.getBoundingClientRect();
+        const offset = y - box.top - box.height / 2;
+        if (offset < 0 && offset > closest.offset) closest = { offset, el: child };
+    }
+    return closest.el;
+}
+
+// Wired ONCE on the persistent list element (not per render). While a drag is in
+// flight it live-reorders the DOM as the pointer moves; the drop is committed by
+// the tab's dragend → persistOrder.
+function wireListDnd() {
+    listEl.addEventListener("dragover", (e) => {
+        if (!draggingId) return;
+        e.preventDefault();
+        if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
+        const dragging = listEl.querySelector(`.term-item[data-id="${draggingId}"]`);
+        if (!dragging) return;
+        const after = dragAfterElement(e.clientY);
+        if (after == null) listEl.appendChild(dragging);
+        else if (after !== dragging) listEl.insertBefore(dragging, after);
+    });
+    listEl.addEventListener("drop", (e) => {
+        if (draggingId) e.preventDefault();
+    });
+}
+
+// Persist the current DOM order to the server. Best-effort: the reorder is
+// already reflected locally, and the next poll re-syncs from the server if this
+// fails. The set of ids is unchanged, so polling keeps patching in place (see
+// idsKey) and won't rebuild over the new order.
+async function persistOrder() {
+    const ids = [...listEl.querySelectorAll(".term-item")].map((li) => li.dataset.id);
+    try {
+        await fetch("/api/terminals/reorder", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ ids }),
+        });
+    } catch {
+        /* best-effort — server order re-syncs on the next add/remove rebuild */
+    }
+}
+
 // ── rendering ───────────────────────────────────────────────────────────────
 
 function renderList(sessions) {
@@ -209,6 +300,13 @@ function renderList(sessions) {
         li.className = "term-item";
         li.dataset.id = s.id;
         if (s.id === activeId) li.classList.add("active");
+
+        // Reorder by dragging the tab itself — the whole row is the handle, no grip
+        // glyph. Drags that start on the close slider, fork button, or an open
+        // rename input are ignored so those keep working; drop logic is wired once
+        // on listEl (wireListDnd).
+        li.draggable = true;
+        wireTabDrag(li, s.id);
 
         const label = document.createElement("button");
         label.type = "button";
@@ -224,6 +322,11 @@ function renderList(sessions) {
         const title = document.createElement("span");
         title.className = "term-item-title";
         title.textContent = s.title;
+        title.addEventListener("dblclick", (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            startRename(li, label, s);
+        });
 
         name.append(dot, title);
         applyDead(name, s);
@@ -298,6 +401,12 @@ function patchStatus(sessions) {
         if (dot) dot.className = dotClass(s);
         const name = li.querySelector(".term-item-name");
         if (name) applyDead(name, s);
+        // Keep the tab label in sync with the live last-command title, unless the
+        // user is mid-rename on this tab (the input is a sibling of the label).
+        if (!li.querySelector(".term-item-rename-input")) {
+            const titleEl = li.querySelector(".term-item-title");
+            if (titleEl && titleEl.textContent !== s.title) titleEl.textContent = s.title;
+        }
         const sub = li.querySelector(".term-item-cwd");
         if (sub) {
             const { text, isSummary } = subInfo(s);
@@ -390,6 +499,61 @@ async function createSession(cwd) {
     }
     await load();
     activate(data.id);
+}
+
+// Inline-rename a tab. The label is a <button> (can't nest an <input>), so we
+// hide it and drop a text input in its place inside the <li>. Enter/blur commits
+// (empty clears the custom name → reverts to the auto last-command title); Escape
+// cancels. The PATCH persists customTitle server-side; load() re-renders with it.
+function startRename(li, label, s) {
+    if (li.querySelector(".term-item-rename-input")) return;
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = "term-item-rename-input";
+    input.value = s.customTitle || "";
+    input.placeholder = s.baseTitle || s.title || "name";
+    input.setAttribute("aria-label", "rename terminal");
+    label.hidden = true;
+    li.insertBefore(input, label.nextSibling);
+    input.focus();
+    input.select();
+
+    let done = false;
+    const finish = async (commit) => {
+        if (done) return;
+        done = true;
+        input.remove();
+        label.hidden = false;
+        if (!commit) return;
+        const v = input.value.trim();
+        if (v === (s.customTitle || "")) return; // unchanged
+        try {
+            await fetch(`/api/terminals/${s.id}`, {
+                method: "PATCH",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ title: v }),
+            });
+        } catch {
+            /* leave the label as-is; next poll reflects server truth */
+        }
+        await load();
+    };
+
+    input.addEventListener("keydown", (e) => {
+        e.stopPropagation();
+        if (e.key === "Enter") {
+            e.preventDefault();
+            finish(true);
+        } else if (e.key === "Escape") {
+            e.preventDefault();
+            finish(false);
+        }
+    });
+    input.addEventListener("blur", () => finish(true));
+    // Keep clicks/drags on the input from bubbling to the tab (activate/close).
+    for (const ev of ["click", "pointerdown", "dblclick"]) {
+        input.addEventListener(ev, (e) => e.stopPropagation());
+    }
 }
 
 async function closeSession(id) {
@@ -541,6 +705,7 @@ function wireCloseSlider(el, id) {
 // it will perform next.
 function setCollapsed(collapsed) {
     mainEl.classList.toggle("sidebar-collapsed", collapsed);
+    if (collapsed) setUtilsOpen(false);
     if (collapseBtn) {
         const label = collapsed ? "Expand sidebar" : "Collapse sidebar";
         collapseBtn.title = label;
@@ -564,6 +729,27 @@ if (collapseBtn) {
     collapseBtn.addEventListener("click", () =>
         setCollapsed(!mainEl.classList.contains("sidebar-collapsed")),
     );
+}
+
+// ── utils dropdown ──────────────────────────────────────────────────────────────
+// The centered caret reveals the theme picker, default-dir form and vim-tips
+// button below the toolbar. Closes on outside click, Escape, or collapse.
+function setUtilsOpen(open) {
+    if (!utilsPanel || !utilsToggle) return;
+    utilsPanel.hidden = !open;
+    utilsToggle.setAttribute("aria-expanded", String(open));
+}
+
+if (utilsToggle && utilsPanel) {
+    utilsToggle.addEventListener("click", () => setUtilsOpen(utilsPanel.hidden));
+    document.addEventListener("click", (e) => {
+        if (utilsPanel.hidden) return;
+        if (utilsToggle.contains(e.target) || utilsPanel.contains(e.target)) return;
+        setUtilsOpen(false);
+    });
+    document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape" && !utilsPanel.hidden) setUtilsOpen(false);
+    });
 }
 
 // ── color scheme picker ───────────────────────────────────────────────────────
@@ -604,6 +790,19 @@ wireSchemePicker();
 
 newBtn.addEventListener("click", () => createSession(cwdInput.value.trim()));
 
+// ── vim tips modal ────────────────────────────────────────────────────────────
+if (tipsBtn && tipsModal) {
+    tipsBtn.addEventListener("click", () => {
+        tipsModal.hidden = false;
+    });
+    tipsModal.addEventListener("click", (e) => {
+        if (e.target.matches("[data-modal-close]")) tipsModal.hidden = true;
+    });
+    document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape" && !tipsModal.hidden) tipsModal.hidden = true;
+    });
+}
+
 cwdForm.addEventListener("submit", (e) => {
     e.preventDefault();
     clearError();
@@ -615,5 +814,6 @@ cwdForm.addEventListener("submit", (e) => {
     flashSaved();
 });
 
+wireListDnd(); // once — the list element persists across renders
 load();
 setInterval(refresh, POLL_MS);

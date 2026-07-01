@@ -24,6 +24,16 @@
 const INPUT = 0x30; // '0'
 const RECONNECT_MS = 1000;
 
+// ── clipboard/selection debug ─────────────────────────────────────────────────
+// Flip CLIP_DEBUG to true to trace the copy path (which branch ran, whether the
+// async writeText resolved or rejected, OSC 52 arrivals). Kept because this
+// stack — xterm ↔ ttyd ↔ tmux(`mouse on`) — makes copy behavior non-obvious.
+// All output is prefixed "[weave-clip]" for easy console filtering.
+const CLIP_DEBUG = false;
+function clog(msg) {
+    if (CLIP_DEBUG) console.log("[weave-clip] " + msg);
+}
+
 const params = new URLSearchParams(location.search);
 const port = params.get("port");
 const host = location.hostname || "127.0.0.1";
@@ -59,6 +69,13 @@ const term = new Terminal({
     // Option-as-Meta so Alt/Option chords (word motion, Option+Enter) behave like
     // a configured native terminal — a bonus alongside the explicit remaps below.
     macOptionIsMeta: true,
+    // Option+drag forces a LOCAL text selection even when the running TUI (Claude
+    // Code) has mouse reporting on and would otherwise swallow the drag. Without
+    // this, macOS has no modifier that forces selection while a full-screen app
+    // owns the mouse — so you could never select (and thus never Cmd+C copy) text
+    // out of a live Claude session. Operates on mousedown; independent of the
+    // macOptionIsMeta keyboard path above.
+    macOptionClickForcesSelection: true,
     scrollback: 10000,
     theme: activeSchemeTheme(),
 });
@@ -191,6 +208,109 @@ function connect() {
 // clipboard.
 let lastSelection = "";
 
+// Last-resort copy for when the async Clipboard API is unavailable (insecure
+// context / old browser). It STEALS FOCUS — focusing the throwaway textarea and
+// handing focus back to the terminal churns focus, which clears xterm's on-screen
+// selection. That's invisible under a repainting TUI (Claude Code), but in a
+// plain shell it makes a fresh drag-selection vanish the instant you release. So
+// this is a fallback ONLY, never the normal path.
+function execCommandCopy(text) {
+    clog("execCommandCopy running (FOCUS STEAL)");
+    try {
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        ta.setAttribute("readonly", "");
+        ta.style.position = "fixed";
+        ta.style.top = "0";
+        ta.style.left = "0";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        const ok = document.execCommand("copy");
+        ta.remove();
+        term.focus();
+        clog("execCommandCopy done ok=" + ok);
+        if (ok) showCopied();
+    } catch (err) {
+        clog("execCommandCopy threw: " + err);
+    }
+}
+
+// Copy `text` to the system clipboard.
+//
+// `allowFocusSteal` gates the execCommandCopy fallback. That fallback focuses a
+// throwaway textarea, which CLEARS xterm's on-screen selection — acceptable for
+// an explicit Cmd+C (you asked to copy; losing the highlight after is normal),
+// but forbidden for copy-on-select, where the whole point is that the drag
+// highlight survives. Crucially, some browsers (Safari especially) accept
+// clipboard writes from a keydown but REJECT them from a mouseup — so on
+// copy-on-select the async write can reject, and if we let the .catch run the
+// focus-stealing fallback it wipes the highlight the instant you release the
+// drag. So copy-on-select passes allowFocusSteal=false: async-write or nothing,
+// never a focus steal. Cmd+C stays the reliable backstop there (keydown writes
+// aren't rejected).
+function copyText(text, allowFocusSteal = true) {
+    if (!text) return;
+    clog(`copyText len=${text.length} steal=${allowFocusSteal} hasAsync=${!!navigator.clipboard?.writeText} hasFocus=${document.hasFocus()}`);
+    if (navigator.clipboard?.writeText) {
+        navigator.clipboard.writeText(text).then(
+            () => {
+                clog("writeText OK");
+                showCopied();
+            },
+            (err) => {
+                clog(`writeText REJECT ${err && err.name}: ${err && err.message}`);
+                if (allowFocusSteal) execCommandCopy(text);
+            },
+        );
+        return;
+    }
+    clog("copyText: no async clipboard API");
+    if (allowFocusSteal) execCommandCopy(text);
+}
+
+// ── "Copied" toast ────────────────────────────────────────────────────────────
+// The plain-shell copy path (tmux copy-mode → OSC 52) auto-copies and clears the
+// highlight the instant you release, so there's no lingering selection to signal
+// success. This flashes a small confirmation, ~0.8s, so a copy is never silent.
+// Colors invert the active scheme (fg-on-bg → bg-on-fg) so it always reads and
+// matches whatever palette is live. pointer-events:none so it never blocks the
+// terminal; it's positioned within the iframe, i.e. over the terminal pane.
+let toastEl = null;
+let toastTimer = null;
+function showCopied() {
+    if (!toastEl) {
+        toastEl = document.createElement("div");
+        toastEl.textContent = "Copied";
+        toastEl.setAttribute("aria-live", "polite");
+        Object.assign(toastEl.style, {
+            position: "fixed",
+            bottom: "12px",
+            left: "50%",
+            transform: "translateX(-50%)",
+            padding: "3px 12px",
+            borderRadius: "6px",
+            font: '600 12px ui-monospace, SFMono-Regular, Menlo, Monaco, monospace',
+            letterSpacing: "0.03em",
+            pointerEvents: "none",
+            opacity: "0",
+            transition: "opacity 150ms ease",
+            zIndex: "9999",
+            boxShadow: "0 2px 8px rgba(0,0,0,0.35)",
+        });
+        document.body.appendChild(toastEl);
+    }
+    const theme = activeSchemeTheme();
+    toastEl.style.background = theme.foreground;
+    toastEl.style.color = theme.background;
+    toastEl.style.opacity = "1";
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => {
+        if (toastEl) toastEl.style.opacity = "0";
+    }, 800);
+}
+
 // ── custom key handling — the reason this client exists ───────────────────────
 function installKeyHandler() {
     term.attachCustomKeyEventHandler((e) => {
@@ -240,9 +360,7 @@ function installKeyHandler() {
             const sel = term.getSelection() || lastSelection;
             if (sel) {
                 e.preventDefault();
-                navigator.clipboard?.writeText(sel).catch(() => {
-                    /* clipboard blocked (perms / insecure context) — ignore */
-                });
+                copyText(sel);
                 return false;
             }
         }
@@ -260,11 +378,54 @@ if (!port) {
     term.onData((d) => sendInput(d));
     term.onResize(() => sendResize());
 
+    // ── OSC 52 → system clipboard — the real fix for plain-shell copy ─────────
+    // tmux runs with `mouse on` (lib/terminals.ts), so in a plain shell a normal
+    // drag is forwarded to tmux (xterm reports mouseMode=drag), NOT selected
+    // locally by xterm. tmux does its own copy-mode selection and on release
+    // emits an OSC 52 escape carrying the text (tmux set-clipboard defaults to
+    // `external`, which sends OSC 52 to the outer terminal). xterm.js ignores
+    // OSC 52 by default, so that text used to evaporate — you'd see tmux's
+    // highlight flash and vanish (copy-selection-and-cancel) with nothing on the
+    // system clipboard. Here we decode OSC 52 and push it to the clipboard, so
+    // tmux copy-mode / scrollback selections land there like a native terminal.
+    // The highlight still clears on release — that's tmux confirming the copy.
+    term.parser.registerOscHandler(52, (data) => {
+        // data = "<targets>;<base64|?>"  e.g. "c;SGVsbG8=" ; "?" is a read query.
+        const semi = data.indexOf(";");
+        if (semi === -1) return false;
+        const payload = data.slice(semi + 1);
+        if (payload === "?" || payload === "") return true; // read-back query — unsupported
+        let text = "";
+        try {
+            text = new TextDecoder().decode(
+                Uint8Array.from(atob(payload), (ch) => ch.charCodeAt(0)),
+            );
+        } catch {
+            clog("OSC52 malformed base64 — ignored");
+            return true;
+        }
+        clog(`OSC52 → clipboard len=${text.length}`);
+        copyText(text, true); // no xterm selection to protect here; fallback is fine
+        return true;
+    });
+
     // Remember the most recent non-empty selection so Cmd+C can copy it even
     // after a TUI repaint clears the on-screen highlight (see installKeyHandler).
     term.onSelectionChange(() => {
         const sel = term.getSelection();
         if (sel) lastSelection = sel;
+    });
+
+    // Copy-on-select (classic terminal behavior): the moment a drag finishes
+    // with a non-empty selection, put it on the clipboard — no Cmd+C needed, and
+    // no race with the TUI repaint that would otherwise clear the highlight. We
+    // fire on mouseup (drag settled) rather than onSelectionChange (fires per
+    // pixel during the drag) to avoid hammering the clipboard mid-drag.
+    // allowFocusSteal=false: NEVER fall back to the focus-stealing execCommand
+    // path here — that would clear the very highlight we just made (see copyText).
+    mount.addEventListener("mouseup", () => {
+        const sel = term.getSelection();
+        if (sel) copyText(sel, false);
     });
 
     new ResizeObserver(() => safeFit()).observe(mount);

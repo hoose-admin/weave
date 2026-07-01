@@ -18,7 +18,9 @@
       "Bash(git rev-parse:*)",
       "Bash(bun run smoke:*)",
       "Bash(bun .weave/scripts/smoke.ts:*)",
-      "Bash(bun .weave/scripts/fork.ts:*)"
+      "Bash(bun .weave/scripts/fork.ts:*)",
+      "Bash(bun run firestore:*)",
+      "Bash(bun .weave/scripts/firestore.ts:*)"
     ],
     "deny": [
       "Bash(git push --force:*)",
@@ -109,6 +111,16 @@
             "type": "command",
             "command": "bun \"$CLAUDE_PROJECT_DIR/.claude/hooks/weave_terminal_live.ts\"",
             "timeout": 5
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun \"$CLAUDE_PROJECT_DIR/.claude/hooks/firestore-sync.ts\"",
+            "timeout": 10,
+            "statusMessage": "Syncing tickets to Firestore…"
           }
         ]
       }

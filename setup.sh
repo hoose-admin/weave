@@ -14,6 +14,8 @@ DO_START=0
 DO_GITPERMS=0
 DO_BROWSERS=1
 ASSUME_BROWSERS=0
+DO_FIRESTORE=1
+ASSUME_FIRESTORE=0
 TARGET=""
 
 usage() {
@@ -37,6 +39,10 @@ options:
                 checks, without prompting
   --no-smoke    skip headless-browser provisioning entirely, no prompt
                 (default: ASK when a "smoke" block exists in weave.config.json)
+  --firestore   enable the Firestore ticket mirror (writes a firestore block,
+                verifies your Google credentials, backfills the board) — no prompt
+  --no-firestore  skip the Firestore mirror entirely, no prompt
+                (default: ASK when a "firestore" block exists in weave.config.json)
   -h, --help    show this help
 EOF
 }
@@ -49,6 +55,8 @@ while [ $# -gt 0 ]; do
     --git-perms) DO_GITPERMS=1 ;;
     --smoke)     ASSUME_BROWSERS=1 ;;
     --no-smoke)  DO_BROWSERS=0 ;;
+    --firestore) ASSUME_FIRESTORE=1 ;;
+    --no-firestore) DO_FIRESTORE=0 ;;
     --port)    PORT="${2:?--port needs a value}"; PORT_SET=1; shift ;;
     -h|--help) usage; exit 0 ;;
     -*)        echo "unknown option: $1" >&2; usage; exit 2 ;;
@@ -158,6 +166,39 @@ elif [ "$DO_BROWSERS" = 1 ] && [ "$HAS_SMOKE" = 1 ]; then
   fi
 fi
 
+# ── 5c. optional: enable the Firestore ticket mirror ─────────────────────────
+#    Reflects ticket status into a Firestore collection so the board can be
+#    watched off-repo (a phone, a shared page, a cron report). Zero-dep: Firestore
+#    REST + your local Application Default Credentials. OPT-IN: only when a
+#    "firestore" block exists in weave.config.json, or when --firestore forces it
+#    (init resolves the project from gcloud/ADC and writes the block). Credentials
+#    are NEVER stored in git — they come from `gcloud auth application-default login`.
+HAS_FIRESTORE=0
+grep -q '"firestore"' "$TARGET/weave.config.json" 2>/dev/null && HAS_FIRESTORE=1
+provision_firestore() {
+  command -v gcloud >/dev/null 2>&1 || echo "  ⚠ gcloud not found — install the Google Cloud SDK, then: gcloud auth application-default login"
+  echo "  → enabling Firestore mirror (writes config, verifies credentials, backfills)…"
+  if ( cd "$TARGET" && bun .weave/scripts/firestore.ts init ); then
+    echo "  ✓ firestore mirror enabled"
+  else
+    echo "  ⚠ firestore init did not complete — run later:  (cd \"$TARGET\" && bun .weave/scripts/firestore.ts init --project <gcp-id>)"
+  fi
+}
+if [ "$ASSUME_FIRESTORE" = 1 ]; then
+  provision_firestore
+elif [ "$DO_FIRESTORE" = 1 ] && [ "$HAS_FIRESTORE" = 1 ]; then
+  if [ -t 0 ]; then
+    printf "  A \"firestore\" block exists — enable the Firestore ticket mirror now (verify creds + backfill)? [y/N] "
+    _fans=""; read -r _fans || true
+    case "$_fans" in
+      [yY]|[yY][eE][sS]) provision_firestore ;;
+      *) echo "  ↳ skipped — run later:  (cd \"$TARGET\" && bun .weave/scripts/firestore.ts init)" ;;
+    esac
+  else
+    echo "  (non-interactive — skipping firestore enable; re-run with --firestore)"
+  fi
+fi
+
 # ── 6. first-run bug-scan (seeds the backlog with REAL findings from your code) ──
 #    The deep, multi-agent scan. OPTIONAL but recommended; it can take several
 #    minutes and a meaningful number of Claude tokens — so we ASK first (unless
@@ -238,6 +279,15 @@ cat <<'EOF'
     2. one-time, repo-local Chromium:   cd .weave && bun run install:browsers
   test-ticket then runs a headless smoke automatically for web targets; console
   errors land in the ticket's evidence. CLI/library repos: skip — it no-ops.
+EOF
+
+cat <<'EOF'
+
+  firestore mirror (optional) — watch ticket status from OUTSIDE the repo:
+    1. a Firestore DB (Native mode) + local creds:  gcloud auth application-default login
+    2. enable:   bun .weave/scripts/firestore.ts init --project <gcp-project-id>
+  Ticket status then syncs to Firestore live (real-time writes + a convergent
+  reconcile); zero-dep (Firestore REST + your ADC). Not set up? It no-ops.
 EOF
 # (bug-scan prompt + messaging handled in step 6 above)
 

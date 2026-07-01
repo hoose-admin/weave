@@ -41,9 +41,10 @@ import {
   type AdrState,
   type ParsedAdr,
 } from "./lib/adrs.ts";
-import { listSessions, createSession, killSession, readLive } from "./lib/terminals.ts";
+import { listSessions, createSession, killSession, readLive, readLastCommand, renameSession, reorderSessions } from "./lib/terminals.ts";
 import { activeRuns } from "./lib/chaos.ts";
 import { capturePane, inferState } from "./lib/terminal-status.ts";
+import { syncBoardSafe } from "./lib/firestore.ts";
 
 type GraphKind = "tickets" | "dataflow" | "schemas" | "adrs" | "ai";
 
@@ -376,6 +377,10 @@ const serveOptions = {
     // API
     if (pathname === "/api/buckets" && req.method === "GET") {
       await archiveStaleComplete();
+      // Mirror the current board to Firestore if enabled — fire-and-forget and
+      // self-throttled (≤ once / 10s) so the poll never blocks on the network, and
+      // interactive raw-`mv` moves converge even with no chaos loop running.
+      void syncBoardSafe({ minIntervalMs: 10_000 });
       const visible = BUCKETS.filter((b) => b !== "7-archive");
       const out: Record<string, unknown> = {};
       for (const b of visible) out[b] = await listBucket(b);
@@ -933,10 +938,21 @@ const serveOptions = {
       const sessions = await listSessions();
       const enriched = await Promise.all(
         sessions.map(async (s) => {
+          // Tab label precedence: user rename → last command run → dir basename.
+          const lastCommand = await readLastCommand(s.id);
+          const baseTitle = s.title;
+          const customTitle = s.customTitle ?? null;
+          const base = {
+            ...s,
+            title: customTitle || lastCommand || baseTitle,
+            baseTitle,
+            customTitle,
+            lastCommand,
+          };
           const live = await readLive(s.id);
           if (live?.state) {
             return {
-              ...s,
+              ...base,
               status: live.state,
               summary: live.summary ?? null,
               notification: live.notification ?? null,
@@ -944,7 +960,7 @@ const serveOptions = {
             };
           }
           const status = inferState(await capturePane(s.tmux));
-          return { ...s, status, summary: null, notification: null, sessionId: null };
+          return { ...base, status, summary: null, notification: null, sessionId: null };
         }),
       );
       return json(enriched);
@@ -981,9 +997,38 @@ const serveOptions = {
         return err(e instanceof Error ? e.message : String(e), 400);
       }
     }
+    // Persist the tab list's vertical order after a drag-reorder. Body: {ids:[…]}
+    // in the new top-to-bottom order. Checked before the /:id routes below (the
+    // id regex requires a `term-` prefix, so "reorder" can't collide either way).
+    if (pathname === "/api/terminals/reorder" && req.method === "POST") {
+      let payload: Record<string, unknown> = {};
+      try {
+        payload = (await req.json()) as Record<string, unknown>;
+      } catch {
+        /* fall through to the empty-ids guard */
+      }
+      const ids = Array.isArray(payload.ids)
+        ? (payload.ids.filter((x) => typeof x === "string") as string[])
+        : null;
+      if (!ids || !ids.length) return err("ids array required");
+      await reorderSessions(ids);
+      return json({ ok: true });
+    }
     const termIdMatch = pathname.match(/^\/api\/terminals\/(term-[a-z0-9]+)$/);
     if (termIdMatch && req.method === "DELETE") {
       return json(await killSession(termIdMatch[1]));
+    }
+    if (termIdMatch && (req.method === "PATCH" || req.method === "PUT")) {
+      let payload: Record<string, unknown> = {};
+      try {
+        payload = (await req.json()) as Record<string, unknown>;
+      } catch {
+        /* empty body → clears the custom name */
+      }
+      const title = typeof payload.title === "string" ? payload.title : "";
+      const r = await renameSession(termIdMatch[1], title);
+      if (!r) return err("terminal not found", 404);
+      return json({ ok: true, customTitle: r.customTitle ?? null });
     }
 
     // Static
