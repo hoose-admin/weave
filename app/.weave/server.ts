@@ -940,10 +940,11 @@ const serveOptions = {
               status: live.state,
               summary: live.summary ?? null,
               notification: live.notification ?? null,
+              sessionId: live.sessionId ?? null,
             };
           }
           const status = inferState(await capturePane(s.tmux));
-          return { ...s, status, summary: null, notification: null };
+          return { ...s, status, summary: null, notification: null, sessionId: null };
         }),
       );
       return json(enriched);
@@ -958,8 +959,24 @@ const serveOptions = {
       const cwd = typeof payload.cwd === "string" ? payload.cwd : undefined;
       const title =
         typeof payload.title === "string" ? payload.title : undefined;
+      // Optional fork intent: resume an existing Claude session into the new
+      // terminal as a divergent copy. The command is built here (not accepted as
+      // a raw string) so this endpoint can't be used to run arbitrary shell.
+      let command: string | undefined;
+      const fork = payload.fork as { sessionId?: unknown; prompt?: unknown } | undefined;
+      if (fork && typeof fork.sessionId === "string" && fork.sessionId.trim()) {
+        const sid = fork.sessionId.trim();
+        // sid is interpolated UNQUOTED into the command, so constrain it to the
+        // shape of a session id (UUID-like) — this rejects any shell metacharacters.
+        if (!/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(sid)) {
+          return err("invalid fork.sessionId", 400);
+        }
+        const shq = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`; // single-quote for the shell
+        const prompt = typeof fork.prompt === "string" ? fork.prompt.trim() : "";
+        command = `claude --resume ${sid} --fork-session` + (prompt ? ` ${shq(prompt)}` : "");
+      }
       try {
-        return json(await createSession({ cwd, title }), 201);
+        return json(await createSession({ cwd, title, command }), 201);
       } catch (e) {
         return err(e instanceof Error ? e.message : String(e), 400);
       }
@@ -1014,6 +1031,12 @@ if (!server) {
     `weave: no free port in ${PORT}–${PORT + PORT_TRIES - 1}`,
   );
 }
+
+// Publish the ACTUAL bound port (the loop may have walked past a busy base PORT)
+// so terminals we spawn seed it as WEAVE_PORT — letting an in-session `claude` /
+// the `/fork` script reach THIS dashboard, not a same-config weave from another
+// repo on the base port.
+process.env.WEAVE_PORT = String(server.port);
 
 if (server.port !== PORT) {
   console.warn(

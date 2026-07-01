@@ -17,7 +17,8 @@
       "Bash(git stash:*)",
       "Bash(git rev-parse:*)",
       "Bash(bun run smoke:*)",
-      "Bash(bun .weave/scripts/smoke.ts:*)"
+      "Bash(bun .weave/scripts/smoke.ts:*)",
+      "Bash(bun .weave/scripts/fork.ts:*)"
     ],
     "deny": [
       "Bash(git push --force:*)",

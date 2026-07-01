@@ -17,7 +17,7 @@ import { join, isAbsolute, basename } from "node:path";
 import { readdir, readFile, writeFile, mkdir, unlink } from "node:fs/promises";
 import { existsSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { REPO_ROOT } from "../weave.config.ts";
+import { REPO_ROOT, PORT } from "../weave.config.ts";
 import { allocPort, portFree, waitForPortOccupied } from "./ports.ts";
 
 const CACHE_DIR = join(import.meta.dir, "..", "cache", "terminals");
@@ -122,6 +122,16 @@ async function tmuxHasSession(name: string): Promise<boolean> {
 
 // ── Spawning ──────────────────────────────────────────────────────────────
 
+// The port the dashboard actually bound to. server.ts sets WEAVE_PORT after its
+// bind loop, which may have WALKED past a busy base PORT (e.g. a weave from another
+// repo). Seed it into each terminal so an in-session `claude` — and the `/fork`
+// script — reach THIS dashboard, not a same-config instance on the base port.
+// Falls back to the configured PORT (e.g. the reconcile path at module load, before
+// the server has bound).
+function dashboardPort(): string {
+  return process.env.WEAVE_PORT || String(PORT);
+}
+
 function ttydArgs(tmuxName: string, port: number, cwd: string, title: string, id: string): string[] {
   return [
     "ttyd",
@@ -138,6 +148,7 @@ function ttydArgs(tmuxName: string, port: number, cwd: string, title: string, id
     // it attaches to the eager-created one the env is already there).
     "tmux", "new", "-A", "-s", tmuxName, "-c", cwd,
     "-e", `WEAVE_TERM_ID=${id}`, "-e", `WEAVE_LIVE_DIR=${LIVE_DIR}`,
+    "-e", `WEAVE_PORT=${dashboardPort()}`,
   ];
 }
 
@@ -215,8 +226,33 @@ async function applySessionEnv(tmuxName: string, id: string): Promise<void> {
   try {
     await set("WEAVE_TERM_ID", id);
     await set("WEAVE_LIVE_DIR", LIVE_DIR);
+    await set("WEAVE_PORT", dashboardPort());
   } catch {
     /* best-effort — status degrades to the pane-scrape fallback */
+  }
+}
+
+// Type a command line into the session's interactive shell (as if the user typed
+// it, then Enter). Used to auto-launch e.g. `claude --resume … --fork-session` in
+// a freshly created terminal. It runs in the shell the eager `tmux new-session`
+// already started — so PATH/rc and the seeded WEAVE_* env are intact, and the
+// pane survives the command exiting (unlike passing a shell-command to `tmux
+// new-session`). Best-effort: the terminal still opens if this fails.
+async function sendKeys(tmuxName: string, line: string): Promise<void> {
+  if (!Bun.which("tmux")) return;
+  const run = (args: string[]) =>
+    Bun.spawn(["tmux", "send-keys", "-t", tmuxName, ...args], {
+      stdout: "ignore",
+      stderr: "ignore",
+    }).exited;
+  try {
+    // `-l --` sends the text LITERALLY: no key-name lookup, no backslash
+    // processing — so a quoted prompt with quotes/backslashes reaches the shell
+    // byte-for-byte. A separate Enter (a real key, so no `-l`) then runs it.
+    await run(["-l", "--", line]);
+    await run(["Enter"]);
+  } catch {
+    /* best-effort — the terminal opens; the user can type the command by hand */
   }
 }
 
@@ -226,6 +262,9 @@ export type TermLive = {
   state?: "working" | "attention" | "idle";
   summary?: string | null;
   notification?: { type: string; message: string; id: string; at: string } | null;
+  // The Claude session id running in this terminal (recorded by the
+  // weave_terminal_live.ts hook). Lets the dashboard fork it from the outside.
+  sessionId?: string | null;
 };
 
 // Read the live status the weave_terminal_live.ts hook keeps for a session, or null
@@ -277,7 +316,7 @@ export async function listSessions(): Promise<Array<TermSession & { alive: boole
   return out;
 }
 
-export async function createSession(opts: { cwd?: string; title?: string } = {}): Promise<TermSession> {
+export async function createSession(opts: { cwd?: string; title?: string; command?: string } = {}): Promise<TermSession> {
   if (!Bun.which("ttyd")) throw new Error("ttyd not found — install it with: brew install ttyd");
   if (!Bun.which("tmux")) throw new Error("tmux not found — install it with: brew install tmux");
 
@@ -297,7 +336,8 @@ export async function createSession(opts: { cwd?: string; title?: string } = {})
   try {
     await Bun.spawn(
       ["tmux", "new-session", "-d", "-s", tmux, "-c", cwd,
-       "-e", `WEAVE_TERM_ID=${id}`, "-e", `WEAVE_LIVE_DIR=${LIVE_DIR}`],
+       "-e", `WEAVE_TERM_ID=${id}`, "-e", `WEAVE_LIVE_DIR=${LIVE_DIR}`,
+       "-e", `WEAVE_PORT=${dashboardPort()}`],
       { stdout: "ignore", stderr: "ignore" },
     ).exited;
   } catch {
@@ -311,6 +351,10 @@ export async function createSession(opts: { cwd?: string; title?: string } = {})
   }
   await applySessionOptions(tmux); // the session now exists — make the wheel scroll
   await applySessionEnv(tmux, id); // let the hook find this terminal's live file
+  // Auto-run a startup command (e.g. a forked `claude --resume … --fork-session`)
+  // in the session's shell. ONLY here — never in reconcile(), which respawns ttyd
+  // against a session whose command is already running (re-sending would double it).
+  if (opts.command && opts.command.trim()) await sendKeys(tmux, opts.command.trim());
 
   const rec: TermSession = {
     id, title, cwd, port,

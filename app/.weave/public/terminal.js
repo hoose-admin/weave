@@ -258,7 +258,20 @@ function renderList(sessions) {
         closer.appendChild(thumb);
         wireCloseSlider(closer, s.id);
 
-        li.append(label, closer);
+        // Fork: open a new terminal that resumes THIS tab's Claude session as a
+        // divergent copy. Enabled only once the session has a recorded id (i.e.
+        // `claude` has run ≥1 turn here, so the live hook captured session_id).
+        const fork = document.createElement("button");
+        fork.type = "button";
+        fork.className = "term-item-fork";
+        fork.appendChild(forkIcon());
+        applyForkState(fork, s);
+        fork.addEventListener("click", (e) => {
+            e.stopPropagation();
+            forkSession(s.id);
+        });
+
+        li.append(label, fork, closer);
         listEl.appendChild(li);
     }
 
@@ -292,6 +305,10 @@ function patchStatus(sessions) {
             sub.title = text;
             sub.classList.toggle("is-summary", isSummary);
         }
+        // Keep the fork button in sync without a full re-render — a bare shell that
+        // just started `claude` gains a sessionId mid-poll, which should enable it.
+        const fork = li.querySelector(".term-item-fork");
+        if (fork) applyForkState(fork, s);
     }
 }
 
@@ -389,6 +406,72 @@ async function closeSession(id) {
     if (activeId === id) activeId = null;
     await load();
     if (!activeId && frames.size) activate(frames.keys().next().value);
+}
+
+// The fork glyph — a small git-branch icon, built with createElementNS to match
+// this file's no-innerHTML DOM style. `stroke: currentColor` so it inherits the
+// button's muted/accent/disabled colors.
+function forkIcon() {
+    const NS = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(NS, "svg");
+    for (const [k, v] of Object.entries({
+        viewBox: "0 0 16 16", width: "12", height: "12", fill: "none",
+        stroke: "currentColor", "stroke-width": "1.4",
+        "stroke-linecap": "round", "stroke-linejoin": "round", "aria-hidden": "true",
+    })) svg.setAttribute(k, v);
+    const parts = [
+        ["circle", { cx: "4", cy: "3.5", r: "1.6" }],
+        ["circle", { cx: "4", cy: "12.5", r: "1.6" }],
+        ["circle", { cx: "12", cy: "5.5", r: "1.6" }],
+        ["path", { d: "M4 5.1v5.8" }],
+        ["path", { d: "M12 7.1c0 3-4 2.6-6.2 3.9" }],
+    ];
+    for (const [tag, attrs] of parts) {
+        const el = document.createElementNS(NS, tag);
+        for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+        svg.appendChild(el);
+    }
+    return svg;
+}
+
+// Enable the fork button only when the tab has a Claude session id to resume, and
+// keep its tooltip/aria in sync. Shared by first render and in-place polling.
+function applyForkState(el, s) {
+    const ok = !!s.sessionId;
+    el.disabled = !ok;
+    el.title = ok
+        ? "Fork this conversation into a new terminal"
+        : "Run `claude` here first — then you can fork it";
+    el.setAttribute("aria-label", ok ? `fork ${s.title}` : `fork ${s.title} (no session yet)`);
+}
+
+// Fork a tab: ask the server to open a new terminal that resumes the tab's Claude
+// session as a divergent copy, in the SAME cwd. Resolve the session from
+// lastSessions at click time so we never act on a stale sessionId. Mirrors
+// createSession() (auto-selects the new tab).
+async function forkSession(id) {
+    const s = lastSessions.find((x) => x.id === id);
+    if (!s || !s.sessionId) return;
+    clearError();
+    let data;
+    try {
+        const r = await fetch("/api/terminals", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+                cwd: s.cwd || undefined,
+                title: `fork: ${s.title}`,
+                fork: { sessionId: s.sessionId },
+            }),
+        });
+        data = await r.json();
+        if (!r.ok) throw new Error(data && data.error ? data.error : "failed to fork terminal");
+    } catch (e) {
+        showError(e.message || String(e));
+        return;
+    }
+    await load();
+    activate(data.id);
 }
 
 // Wire one tab's slide-to-close slider. Progress `f` runs 0 (top, open) → 1

@@ -245,6 +245,7 @@ main.terminal-page.sidebar-collapsed
 main.terminal-page.sidebar-collapsed .term-item-cwd,
 main.terminal-page.sidebar-collapsed .term-item-title,
 main.terminal-page.sidebar-collapsed .term-item-dead,
+main.terminal-page.sidebar-collapsed .term-item-fork,
 main.terminal-page.sidebar-collapsed .term-item-close {
     display: none;
 }
@@ -323,6 +324,53 @@ main.terminal-page.sidebar-collapsed .term-item-name {
     direction: rtl; /* keep the meaningful tail of long paths visible */
     text-align: left;
 }
+/* Fork: open a NEW terminal that resumes this tab's Claude session as a divergent
+   copy (the server builds `claude --resume … --fork-session`). Reveals on
+   hover/active like the close slider; hidden until the tab has a live Claude
+   session id, then greyed-but-visible on hover so the affordance is discoverable. */
+.term-item-fork {
+    flex: 0 0 auto;
+    align-self: center;
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    margin: 0 3px 0 0;
+    padding: 0;
+    border-radius: 5px;
+    border: 1px solid var(--border);
+    background: var(--term-tab-active);
+    color: var(--muted);
+    cursor: pointer;
+    opacity: 0;
+    transition:
+        opacity 0.12s ease,
+        color 0.12s ease,
+        border-color 0.12s ease;
+}
+.term-item:hover .term-item-fork,
+.term-item.active .term-item-fork {
+    opacity: 1;
+}
+.term-item-fork:hover:not(:disabled) {
+    color: var(--accent);
+    border-color: var(--accent);
+}
+.term-item-fork:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+    opacity: 1;
+}
+.term-item-fork:disabled {
+    cursor: default;
+}
+.term-item:hover .term-item-fork:disabled,
+.term-item.active .term-item-fork:disabled {
+    opacity: 0.28; /* faint — hints "run claude here to enable forking" */
+}
+
 /* Slide-to-close: a short, minimalist vertical slider pinned to the right of each
    tab — a custom track div + thumb div (no native range / vendor pseudo-elements;
    role="slider" + keyboard wired in terminal.js). The track is a bordered,

@@ -31,6 +31,7 @@ type Live = {
   state?: "working" | "attention" | "idle";
   summary?: string | null;
   notification?: Notification | null;
+  sessionId?: string | null;
   updatedAt?: string;
 };
 
@@ -64,6 +65,10 @@ async function main(): Promise<void> {
   const file = join(liveDir, `${termId}.json`);
   const st: Live = load(file) ?? { id: termId };
   st.id = termId;
+  // Record the Claude session id so the dashboard can fork THIS terminal from the
+  // outside — it can't read the session's CLAUDE_CODE_SESSION_ID env directly.
+  // session_id is present on every hook payload; keep the last value if one omits it.
+  st.sessionId = (typeof data.session_id === "string" && data.session_id) || st.sessionId || null;
 
   if (event === "UserPromptSubmit") {
     const prompt = String(data.prompt ?? "").trim();
