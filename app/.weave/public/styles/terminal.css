@@ -561,7 +561,7 @@ main.terminal-page.sidebar-collapsed .term-item-name {
     }
 }
 
-/* ── terminal toolbar + utils dropdown (ported from loopweave) ─────────────── */
+/* ── terminal toolbar + utils dropdown ─────────────────────────────────────── */
 .term-toolbar {
     display: flex;
     align-items: center;
