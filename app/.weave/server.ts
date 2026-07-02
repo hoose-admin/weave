@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { readFile, stat, readdir } from "node:fs/promises";
 import { PORT, REPO_ROOT } from "./weave.config.ts";
 import {
@@ -42,6 +42,7 @@ import {
   type ParsedAdr,
 } from "./lib/adrs.ts";
 import { listSessions, createSession, killSession, readLive, readLastCommand, renameSession, reorderSessions } from "./lib/terminals.ts";
+import { runSearch, SEARCH_ROOT } from "./lib/search.ts";
 import { activeRuns } from "./lib/chaos.ts";
 import { capturePane, inferState } from "./lib/terminal-status.ts";
 import { syncBoardSafe } from "./lib/firestore.ts";
@@ -253,6 +254,32 @@ const IGNORE_DIRS = new Set([
   "build",
 ]);
 
+// Build a safe editor command that opens a repo file (from a search result) at a
+// line — used by the terminal "Search" tab's click-to-open. The path is validated
+// to live inside the repo AND to exist, then made absolute + single-quoted, so the
+// string can be typed into a shell with no traversal and no injection. vim matches
+// the terminal's vim-centric workflow and its `+N` jumps to the line; swap the
+// binary here to use a different editor (e.g. `code -g <file>:<line>`).
+async function buildOpenCommand(relPath: unknown, line: number | null): Promise<string> {
+  const clean = String(relPath ?? "").replace(/^\/+/, "");
+  if (!clean) throw new Error("path required");
+  const rootResolved = resolve(PROJECT_ROOT);
+  const resolved = resolve(PROJECT_ROOT, clean);
+  if (resolved !== rootResolved && !resolved.startsWith(rootResolved + sep)) {
+    throw new Error("path outside repo");
+  }
+  const st = await stat(resolved).catch(() => null);
+  if (!st || !st.isFile()) throw new Error("file not found");
+  const shq = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
+  const at = line && line > 0 ? `+${Math.floor(line)} ` : "";
+  return `vim ${at}-- ${shq(resolved)}`;
+}
+
+// Coerce a JSON `line` field to a positive int, else null.
+function parseLine(v: unknown): number | null {
+  return typeof v === "number" && Number.isFinite(v) && v > 0 ? Math.floor(v) : null;
+}
+
 async function newestMtime(
   rootRel: string,
   predicate: (path: string) => boolean,
@@ -372,6 +399,7 @@ const serveOptions = {
       return serveStatic("terminal.html");
     if (pathname === "/terminal-xterm.html")
       return serveStatic("terminal-xterm.html");
+    if (pathname === "/search.html") return serveStatic("search.html");
     if (/^\/adrs\/ADR-\d+\/?$/.test(pathname)) return serveStatic("adr.html");
 
     // API
@@ -991,8 +1019,23 @@ const serveOptions = {
         const prompt = typeof fork.prompt === "string" ? fork.prompt.trim() : "";
         command = `claude --resume ${sid} --fork-session` + (prompt ? ` ${shq(prompt)}` : "");
       }
+      // Optional open intent: launch an editor on a repo file in the new terminal
+      // (the search tab's click-to-open). Like fork, the command is built here so
+      // this endpoint can't be used to run arbitrary shell.
+      let openTitle: string | undefined;
+      let openCwd: string | undefined;
+      const open = payload.open as { path?: unknown; line?: unknown } | undefined;
+      if (!command && open && typeof open.path === "string") {
+        try {
+          command = await buildOpenCommand(open.path, parseLine(open.line));
+        } catch (e) {
+          return err(e instanceof Error ? e.message : String(e), 400);
+        }
+        openTitle = open.path.split("/").pop() || undefined;
+        openCwd = PROJECT_ROOT; // root the file-viewer terminal at the repo
+      }
       try {
-        return json(await createSession({ cwd, title, command }), 201);
+        return json(await createSession({ cwd: cwd ?? openCwd, title: title ?? openTitle, command }), 201);
       } catch (e) {
         return err(e instanceof Error ? e.message : String(e), 400);
       }
@@ -1029,6 +1072,24 @@ const serveOptions = {
       const r = await renameSession(termIdMatch[1], title);
       if (!r) return err("terminal not found", 404);
       return json({ ok: true, customTitle: r.customTitle ?? null });
+    }
+
+    // The absolute root every search runs against — shown in the search tab UI.
+    if (pathname === "/api/search/root" && req.method === "GET") {
+      return json({ root: SEARCH_ROOT });
+    }
+    // Project-wide text search backing the terminal "Search" tab (Zed ⌘⇧F).
+    // Uses ripgrep when a spawnable `rg` binary exists, else falls back to
+    // `git grep`. Rooted at the repo; see lib/search.ts.
+    if (pathname === "/api/search" && req.method === "GET") {
+      const q = url.searchParams.get("q") ?? "";
+      const regex = url.searchParams.get("regex") === "1";
+      const caseSensitive = url.searchParams.get("case") === "1";
+      try {
+        return json(await runSearch({ query: q, regex, caseSensitive }));
+      } catch (e) {
+        return err(e instanceof Error ? e.message : String(e), 500);
+      }
     }
 
     // Static

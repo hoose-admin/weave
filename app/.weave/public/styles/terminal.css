@@ -299,6 +299,13 @@ main.terminal-page.sidebar-collapsed .term-item-name {
     color: var(--ink);
     font-family: var(--font-mono);
 }
+/* Rename hides the label via label.hidden; without this the author display:flex
+   above beats the UA [hidden] rule, so the label stays and splits the row with
+   the rename input (both flex:1 1 auto). Truly hiding it lets the input grow to
+   the full tab width, minus the fork + close controls (both flex:0 0 auto). */
+.term-item-label[hidden] {
+    display: none;
+}
 .term-item-name {
     display: flex;
     align-items: center;

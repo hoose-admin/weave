@@ -11,6 +11,7 @@
 
 const CWD_KEY = "weave.terminal-cwd";
 const COLLAPSED_KEY = "weave.terminal-sidebar-collapsed";
+const SEARCH_TABS_KEY = "weave.search-tabs";
 const POLL_MS = 2500;
 const CLOSE_AT = 0.94; // close progress (0=top/open … 1=bottom/close) at/above which slide-to-close fires
 
@@ -19,6 +20,7 @@ const listEl = document.getElementById("term-list");
 const stageEl = document.getElementById("term-stage");
 const emptyEl = document.getElementById("term-empty");
 const newBtn = document.getElementById("term-new");
+const searchNewBtn = document.getElementById("term-search-new");
 const cwdForm = document.getElementById("term-cwd-form");
 const cwdInput = document.getElementById("term-cwd");
 const savedTag = document.getElementById("term-cwd-saved");
@@ -41,6 +43,40 @@ const doneIds = new Set(); // background terminals that finished, awaiting a loo
 const lastSummary = new Map(); // id -> last non-null summary (shown on the "done" badge)
 const dismissedNotif = new Map(); // id -> notification.id the user has dismissed
 let lastSessions = []; // most recent /api/terminals payload (so switching tabs can re-render the notif)
+
+// ── search tabs ────────────────────────────────────────────────────────────────
+// Project-search tabs live alongside terminals in the same sidebar list, but are
+// purely client-side: each is an <iframe> to /search.html (no ttyd/tmux). They're
+// pinned above the terminals and persisted so they survive a reload; the search
+// page itself remembers its last query per tab id.
+function loadSearchTabs() {
+    try {
+        const raw = JSON.parse(localStorage.getItem(SEARCH_TABS_KEY) || "[]");
+        if (!Array.isArray(raw)) return [];
+        return raw
+            .filter((t) => t && typeof t.id === "string")
+            .map((t) => ({ id: t.id, title: typeof t.title === "string" ? t.title : "Search" }));
+    } catch {
+        return [];
+    }
+}
+let searchTabs = loadSearchTabs();
+function saveSearchTabs() {
+    try {
+        localStorage.setItem(SEARCH_TABS_KEY, JSON.stringify(searchTabs));
+    } catch {
+        /* persistence best-effort */
+    }
+}
+
+// The unified tab model the list + stage render from: search tabs first (pinned),
+// then the server's terminal sessions. Terminals carry their full payload; search
+// tabs carry just {id, kind, title}.
+function buildTabs(sessions) {
+    const search = searchTabs.map((t) => ({ id: t.id, kind: "search", title: t.title }));
+    const terms = sessions.map((s) => ({ ...s, kind: "term" }));
+    return [...search, ...terms];
+}
 
 // Set-identity key (sorted) — decides ONLY whether a poll must rebuild the list
 // (a tab was added/removed). It's deliberately order-insensitive: a pure drag
@@ -115,22 +151,27 @@ function reconcileDone(sessions) {
 
 // ── iframes ─────────────────────────────────────────────────────────────────
 
-function ensureFrame(s) {
-    let f = frames.get(s.id);
+function ensureFrame(tab) {
+    let f = frames.get(tab.id);
     if (!f) {
         f = document.createElement("iframe");
         f.className = "term-frame";
-        // weave's own client (not ttyd's bundled page) so we can remap keys;
-        // it's same-origin and connects a WebSocket to this session's ttyd port.
-        // clipboard-* in `allow` grants the frame's copy path (terminal-xterm.js)
-        // permission-policy access so Cmd+C / copy-on-select can reach the system
-        // clipboard in every browser, not just same-origin-default Chrome.
+        // clipboard-* in `allow` grants the frame's copy path permission-policy
+        // access so Cmd+C / copy-on-select reaches the system clipboard in every
+        // browser, not just same-origin-default Chrome.
         f.allow = "clipboard-read; clipboard-write";
-        f.src = `/terminal-xterm.html?port=${encodeURIComponent(s.port)}`;
-        f.title = s.title;
+        if (tab.kind === "search") {
+            // Self-contained project-search page (search.html + search.js).
+            f.src = `/search.html?id=${encodeURIComponent(tab.id)}`;
+        } else {
+            // weave's own xterm client (not ttyd's bundled page) so we can remap
+            // keys; it's same-origin and connects a WebSocket to the ttyd port.
+            f.src = `/terminal-xterm.html?port=${encodeURIComponent(tab.port)}`;
+        }
+        f.title = tab.title;
         f.hidden = true;
         stageEl.appendChild(f);
-        frames.set(s.id, f);
+        frames.set(tab.id, f);
     }
     return f;
 }
@@ -277,7 +318,10 @@ function wireListDnd() {
 // fails. The set of ids is unchanged, so polling keeps patching in place (see
 // idsKey) and won't rebuild over the new order.
 async function persistOrder() {
-    const ids = [...listEl.querySelectorAll(".term-item")].map((li) => li.dataset.id);
+    // Only real ttyd sessions are server-ordered; search tabs are client-side.
+    const ids = [...listEl.querySelectorAll(".term-item")]
+        .map((li) => li.dataset.id)
+        .filter((id) => id && id.startsWith("term-"));
     try {
         await fetch("/api/terminals/reorder", {
             method: "POST",
@@ -291,10 +335,50 @@ async function persistOrder() {
 
 // ── rendering ───────────────────────────────────────────────────────────────
 
-function renderList(sessions) {
+// A search tab: search glyph + editable title + slide-to-close, no status dot or
+// fork (it has no live session). Reuses the terminal item chrome/classes.
+function renderSearchItem(tab) {
+    const li = document.createElement("li");
+    li.className = "term-item is-search";
+    li.dataset.id = tab.id;
+    if (tab.id === activeId) li.classList.add("active");
+
+    const label = document.createElement("button");
+    label.type = "button";
+    label.className = "term-item-label";
+    label.title = tab.title || "Search";
+
+    const name = document.createElement("span");
+    name.className = "term-item-name";
+    name.appendChild(searchIcon());
+
+    const title = document.createElement("span");
+    title.className = "term-item-title";
+    title.textContent = tab.title || "Search";
+    name.appendChild(title);
+
+    const sub = document.createElement("span");
+    sub.className = "term-item-cwd is-summary";
+    sub.textContent = "project search";
+    sub.title = "project search";
+
+    label.append(name, sub);
+    label.addEventListener("click", () => activate(tab.id));
+
+    const closer = makeCloser(tab.id, "search", tab.title || "Search");
+    li.append(label, closer);
+    return li;
+}
+
+function renderList(tabs) {
     listEl.replaceChildren();
-    for (const s of sessions) {
+    for (const s of tabs) {
         ensureFrame(s); // pre-mount so connections persist while switching
+
+        if (s.kind === "search") {
+            listEl.appendChild(renderSearchItem(s));
+            continue;
+        }
 
         const li = document.createElement("li");
         li.className = "term-item";
@@ -341,25 +425,9 @@ function renderList(sessions) {
         label.append(name, sub);
         label.addEventListener("click", () => activate(s.id));
 
-        // Slide-to-close: a custom vertical slider (a track div + a thumb div, no
-        // native <input> or vendor pseudo-elements). Drag the thumb to the bottom
-        // and the tab + terminal close — sliding all the way down IS the
-        // confirmation, so no prompt. role="slider" + the keyboard wiring in
-        // wireCloseSlider() keep it operable without a mouse and exposed to AT.
-        const closer = document.createElement("div");
-        closer.className = "term-item-close";
-        closer.tabIndex = 0;
-        closer.title = "slide down to close";
-        closer.setAttribute("role", "slider");
-        closer.setAttribute("aria-orientation", "vertical");
-        closer.setAttribute("aria-label", `slide down to close ${s.title}`);
-        closer.setAttribute("aria-valuemin", "0");
-        closer.setAttribute("aria-valuemax", "100");
-        closer.setAttribute("aria-valuenow", "0");
-        const thumb = document.createElement("div");
-        thumb.className = "term-item-close-thumb";
-        closer.appendChild(thumb);
-        wireCloseSlider(closer, s.id);
+        // Slide-to-close (custom vertical slider). Built by makeCloser; sliding
+        // all the way down IS the confirmation, so no prompt.
+        const closer = makeCloser(s.id, "term", s.title);
 
         // Fork: open a new terminal that resumes THIS tab's Claude session as a
         // divergent copy. Enabled only once the session has a recorded id (i.e.
@@ -378,8 +446,8 @@ function renderList(sessions) {
         listEl.appendChild(li);
     }
 
-    // Drop iframes whose session no longer exists.
-    const live = new Set(sessions.map((s) => s.id));
+    // Drop iframes whose tab no longer exists.
+    const live = new Set(tabs.map((t) => t.id));
     for (const [id, f] of frames) {
         if (!live.has(id)) {
             f.remove();
@@ -387,7 +455,7 @@ function renderList(sessions) {
             if (activeId === id) activeId = null;
         }
     }
-    currentIdsKey = idsKey(sessions);
+    currentIdsKey = idsKey(tabs);
     if (emptyEl) emptyEl.hidden = frames.size > 0;
 }
 
@@ -434,16 +502,17 @@ async function load() {
         sessions = [];
     }
     reconcileDone(sessions);
-    renderList(sessions);
-    if (sessions.length && (!activeId || !frames.has(activeId))) {
-        activate(sessions[0].id);
-    }
     lastSessions = sessions;
+    const tabs = buildTabs(sessions);
+    renderList(tabs);
+    if (tabs.length && (!activeId || !frames.has(activeId))) {
+        activate(tabs[0].id);
+    }
     renderNotif(sessions);
 }
 
-// Poll: patch in place when the session set is unchanged; re-render only when
-// terminals were added/removed.
+// Poll: patch in place when the tab set is unchanged; re-render only when tabs
+// (terminals or search tabs) were added/removed.
 async function refresh() {
     let sessions;
     try {
@@ -452,14 +521,22 @@ async function refresh() {
         return;
     }
     reconcileDone(sessions);
-    if (idsKey(sessions) !== currentIdsKey) {
-        renderList(sessions);
-        if (sessions.length && (!activeId || !frames.has(activeId))) activate(sessions[0].id);
+    lastSessions = sessions;
+    const tabs = buildTabs(sessions);
+    if (idsKey(tabs) !== currentIdsKey) {
+        renderList(tabs);
+        if (tabs.length && (!activeId || !frames.has(activeId))) activate(tabs[0].id);
     } else {
         patchStatus(sessions);
     }
-    lastSessions = sessions;
     renderNotif(sessions);
+}
+
+// Re-render the list from current client state (after adding/closing a search
+// tab). Server-driven refreshes go through load()/refresh().
+function rerender() {
+    renderList(buildTabs(lastSessions));
+    if (!activeId && frames.size) activate(frames.keys().next().value);
 }
 
 // ── actions ─────────────────────────────────────────────────────────────────
@@ -598,6 +675,80 @@ function forkIcon() {
     return svg;
 }
 
+// The search glyph shown on a search tab's name — a small magnifier, built with
+// createElementNS to match this file's no-innerHTML DOM style.
+function searchIcon() {
+    const NS = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(NS, "svg");
+    for (const [k, v] of Object.entries({
+        viewBox: "0 0 16 16", width: "12", height: "12", fill: "none",
+        stroke: "currentColor", "stroke-width": "1.5",
+        "stroke-linecap": "round", "stroke-linejoin": "round", "aria-hidden": "true",
+    })) svg.setAttribute(k, v);
+    svg.classList.add("term-item-search-glyph");
+    const parts = [
+        ["circle", { cx: "7", cy: "7", r: "4.2" }],
+        ["path", { d: "M10.2 10.2 14 14" }],
+    ];
+    for (const [tag, attrs] of parts) {
+        const el = document.createElementNS(NS, tag);
+        for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+        svg.appendChild(el);
+    }
+    return svg;
+}
+
+// Open a new project-search tab (pinned above the terminals) and select it.
+function newSearchTab() {
+    const id = `search-${Date.now().toString(36)}`;
+    searchTabs = [...searchTabs, { id, title: "Search" }];
+    saveSearchTabs();
+    rerender();
+    activate(id);
+}
+
+// Close a search tab: drop it from client state + tear down its iframe.
+function closeSearchTab(id) {
+    searchTabs = searchTabs.filter((t) => t.id !== id);
+    saveSearchTabs();
+    const f = frames.get(id);
+    if (f) {
+        f.remove();
+        frames.delete(id);
+    }
+    if (activeId === id) activeId = null;
+    rerender();
+}
+
+// Open a repo file (clicked in a search tab) in a NEW terminal tab, at the given
+// line (vim +N). Always a fresh tab — never types into a running session — then
+// switch to it so the file is on screen.
+async function openInTerminal(path, line) {
+    clearError();
+    try {
+        const r = await fetch("/api/terminals", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ open: { path, line: line ?? undefined } }),
+        });
+        const data = await r.json();
+        if (!r.ok) throw new Error(data && data.error ? data.error : "failed to open file");
+        await load();
+        activate(data.id);
+    } catch (e) {
+        showError(e.message || String(e));
+    }
+}
+
+// Bridge from the search-tab iframe: it posts {type:"weave-open", path, line}.
+window.addEventListener("message", (e) => {
+    if (e.origin !== location.origin) return;
+    const d = e.data;
+    if (!d || d.type !== "weave-open" || typeof d.path !== "string") return;
+    const line = typeof d.line === "number" && isFinite(d.line) ? d.line : null;
+    openInTerminal(d.path, line);
+});
+
 // Enable the fork button only when the tab has a Claude session id to resume, and
 // keep its tooltip/aria in sync. Shared by first render and in-place polling.
 function applyForkState(el, s) {
@@ -638,11 +789,32 @@ async function forkSession(id) {
     activate(data.id);
 }
 
+// Build a slide-to-close control (track div + thumb div, no native <input> or
+// vendor pseudo-elements) and wire it. `kind` decides whether the close hits the
+// terminal DELETE endpoint or just drops the client-side search tab.
+function makeCloser(id, kind, title) {
+    const closer = document.createElement("div");
+    closer.className = "term-item-close";
+    closer.tabIndex = 0;
+    closer.title = "slide down to close";
+    closer.setAttribute("role", "slider");
+    closer.setAttribute("aria-orientation", "vertical");
+    closer.setAttribute("aria-label", `slide down to close ${title}`);
+    closer.setAttribute("aria-valuemin", "0");
+    closer.setAttribute("aria-valuemax", "100");
+    closer.setAttribute("aria-valuenow", "0");
+    const thumb = document.createElement("div");
+    thumb.className = "term-item-close-thumb";
+    closer.appendChild(thumb);
+    wireCloseSlider(closer, id, kind);
+    return closer;
+}
+
 // Wire one tab's slide-to-close slider. Progress `f` runs 0 (top, open) → 1
 // (bottom, close); CSS positions the thumb from the `--f` custom property.
-// Reaching CLOSE_AT closes the session (once). Operable by pointer drag and by
+// Reaching CLOSE_AT closes the tab (once). Operable by pointer drag and by
 // keyboard: ↓/→ and End slide toward close, ↑/←/Home back toward open.
-function wireCloseSlider(el, id) {
+function wireCloseSlider(el, id, kind) {
     let f = 0;
     let closing = false;
     const clamp = (n) => (n < 0 ? 0 : n > 1 ? 1 : n);
@@ -651,8 +823,9 @@ function wireCloseSlider(el, id) {
         el.style.setProperty("--f", String(f));
         el.setAttribute("aria-valuenow", String(Math.round(f * 100)));
         if (f >= CLOSE_AT && !closing) {
-            closing = true; // fire once — closeSession re-renders and drops this node
-            closeSession(id);
+            closing = true; // fire once — the close re-renders and drops this node
+            if (kind === "search") closeSearchTab(id);
+            else closeSession(id);
         }
     };
     // Relative drag: progress moves by how far the pointer travels from where it
@@ -789,6 +962,7 @@ function wireSchemePicker() {
 wireSchemePicker();
 
 newBtn.addEventListener("click", () => createSession(cwdInput.value.trim()));
+if (searchNewBtn) searchNewBtn.addEventListener("click", newSearchTab);
 
 // ── vim tips modal ────────────────────────────────────────────────────────────
 if (tipsBtn && tipsModal) {
