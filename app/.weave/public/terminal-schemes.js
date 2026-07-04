@@ -25,6 +25,35 @@
 
 (function () {
     const SCHEMES = {
+        evening: {
+            // Vim's built-in `evening` colorscheme (dark grey background).
+            // Surface = Normal/Cursor/Visual; the 16 ANSI colors are lifted
+            // verbatim from evening.vim's own `g:terminal_ansi_colors`.
+            label: "Evening (vim)",
+            theme: {
+                background: "#333333",
+                foreground: "#ffffff",
+                cursor: "#00ff00",
+                cursorAccent: "#000000",
+                selectionBackground: "rgba(153,153,153,0.5)",
+                black: "#000000",
+                red: "#cd0000",
+                green: "#00cd00",
+                yellow: "#cdcd00",
+                blue: "#0087ff",
+                magenta: "#cd00cd",
+                cyan: "#00cdcd",
+                white: "#e5e5e5",
+                brightBlack: "#7f7f7f",
+                brightRed: "#ff0000",
+                brightGreen: "#00ff00",
+                brightYellow: "#ffff00",
+                brightBlue: "#5c5cff",
+                brightMagenta: "#ff00ff",
+                brightCyan: "#00ffff",
+                brightWhite: "#ffffff",
+            },
+        },
         "github-dark": {
             label: "GitHub Dark",
             theme: {
@@ -129,6 +158,67 @@
                 brightWhite: "#eceff4",
             },
         },
+        "gruvbox-dark": {
+            // Standard Gruvbox dark (medium contrast) palette.
+            label: "Gruvbox Dark",
+            theme: {
+                background: "#282828",
+                foreground: "#ebdbb2",
+                cursor: "#fe8019",
+                cursorAccent: "#282828",
+                selectionBackground: "rgba(80,73,69,0.6)",
+                black: "#282828",
+                red: "#cc241d",
+                green: "#98971a",
+                yellow: "#d79921",
+                blue: "#458588",
+                magenta: "#b16286",
+                cyan: "#689d6a",
+                white: "#a89984",
+                brightBlack: "#928374",
+                brightRed: "#fb4934",
+                brightGreen: "#b8bb26",
+                brightYellow: "#fabd2f",
+                brightBlue: "#83a598",
+                brightMagenta: "#d3869b",
+                brightCyan: "#8ec07c",
+                brightWhite: "#ebdbb2",
+            },
+        },
+        "desert-evening": {
+            // Anthropic brand palette. Background/salmon/grey/teal/blue are
+            // exact RGB values measured off the real Claude Code UI:
+            //   salmon 204,139,137 · grey 148,148,148 · bg 51,51,51
+            //   teal 93,202,203 · blue 183,214,251
+            // green/yellow/magenta aren't part of that measured set — they're
+            // carried over from other accent hexes found in the CLI binary
+            // (#558A42 green, #eab308/#fbbf24 yellow, #6437e3/#8b5cf6 magenta)
+            // to fill out a usable 16-color ANSI ramp.
+            label: "Desert Evening",
+            theme: {
+                background: "#333333",
+                foreground: "#ffffff",
+                cursor: "#cc8b89",
+                cursorAccent: "#333333",
+                selectionBackground: "rgba(148,148,148,0.35)",
+                black: "#333333",
+                red: "#cc8b89",
+                green: "#a7cd98",
+                yellow: "#eab308",
+                blue: "#b7d6fb",
+                magenta: "#6437e3",
+                cyan: "#5dcacb",
+                white: "#ffffff",
+                brightBlack: "#949494",
+                brightRed: "#ff9999",
+                brightGreen: "#97c587",
+                brightYellow: "#fbbf24",
+                brightBlue: "#b7d6fb",
+                brightMagenta: "#8b5cf6",
+                brightCyan: "#5dcacb",
+                brightWhite: "#ffffff",
+            },
+        },
         "solarized-dark": {
             label: "Solarized Dark",
             theme: {
@@ -157,7 +247,7 @@
         },
     };
 
-    const DEFAULT = "github-dark";
+    const DEFAULT = "evening";
 
     window.WEAVE_TERM_SCHEMES = SCHEMES;
     window.WEAVE_TERM_SCHEME_DEFAULT = DEFAULT;

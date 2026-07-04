@@ -41,12 +41,30 @@ function out(s: string): void {
   process.stderr.write(s + "\n");
 }
 
+// Read weave.config.json for a read-modify-write. A MISSING file is fine (we're
+// about to create it), but a PRESENT-but-unparseable file must abort — otherwise
+// writeConfig would replace it with just our `firestore` block and silently drop
+// the user's smoke/port/repoRoot settings.
 function readConfig(): Record<string, unknown> {
+  let raw: string;
   try {
-    return JSON.parse(readFileSync(CONFIG_PATH, "utf8")) as Record<string, unknown>;
+    raw = readFileSync(CONFIG_PATH, "utf8");
   } catch {
-    return {};
+    return {}; // absent → safe to create fresh
   }
+  if (!raw.trim()) return {}; // empty file → treat as absent
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    throw new Error(
+      `${CONFIG_PATH} is not valid JSON (${(e as Error).message}) — fix it first; refusing to overwrite and lose other settings`,
+    );
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`${CONFIG_PATH} is not a JSON object — fix it first; refusing to overwrite`);
+  }
+  return parsed as Record<string, unknown>;
 }
 function writeConfig(cfg: Record<string, unknown>): void {
   writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2) + "\n");
@@ -56,10 +74,18 @@ async function gcloudProject(): Promise<string | null> {
   try {
     if (typeof Bun === "undefined") return null;
     const proc = Bun.spawn(["gcloud", "config", "get-value", "project"], {
+      stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
     });
-    const [o] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+    // Bound it and drain both pipes — gcloud can hang or be chatty on stderr.
+    const timer = setTimeout(() => { try { proc.kill(); } catch { /* already gone */ } }, 15_000);
+    const [o] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    clearTimeout(timer);
     const p = o.trim();
     return p && p !== "(unset)" ? p : null;
   } catch {
@@ -240,25 +266,31 @@ function cmdOff(): number {
 
 const verb = process.argv[2] ?? "status";
 let code = 0;
-switch (verb) {
-  case "init":
-    code = await cmdInit();
-    break;
-  case "sync":
-    code = await cmdSync();
-    break;
-  case "status":
-    code = await cmdStatus();
-    break;
-  case "test":
-    code = await cmdTest();
-    break;
-  case "off":
-    code = cmdOff();
-    break;
-  default:
-    out(`unknown verb: ${verb}`);
-    out("usage: bun .weave/scripts/firestore.ts <init|sync|status|test|off> [flags]");
-    code = 2;
+try {
+  switch (verb) {
+    case "init":
+      code = await cmdInit();
+      break;
+    case "sync":
+      code = await cmdSync();
+      break;
+    case "status":
+      code = await cmdStatus();
+      break;
+    case "test":
+      code = await cmdTest();
+      break;
+    case "off":
+      code = cmdOff();
+      break;
+    default:
+      out(`unknown verb: ${verb}`);
+      out("usage: bun .weave/scripts/firestore.ts <init|sync|status|test|off> [flags]");
+      code = 2;
+  }
+} catch (e) {
+  // e.g. readConfig() refusing to overwrite a corrupt weave.config.json.
+  out(`✗ ${(e as Error).message}`);
+  code = 1;
 }
 process.exit(code);

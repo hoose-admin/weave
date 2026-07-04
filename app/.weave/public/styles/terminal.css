@@ -711,7 +711,7 @@ main.terminal-page.sidebar-collapsed .term-item-name {
     font-size: 0.7rem;
     text-transform: uppercase;
     letter-spacing: 0.05em;
-    color: var(--muted);
+    color: var(--accent);
 }
 .term-tips-list {
     list-style: none;
@@ -745,8 +745,19 @@ main.terminal-page.sidebar-collapsed .term-item-name {
 .term-tips-list span {
     color: var(--muted);
 }
+/* Two sections side by side (e.g. vertical vs horizontal movement) so each
+   reads as its own visually distinct column. */
+.term-tips-cols {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px 24px;
+}
+.term-tips-list--single {
+    grid-template-columns: 1fr;
+}
 @media (max-width: 560px) {
-    .term-tips-list {
+    .term-tips-list,
+    .term-tips-cols {
         grid-template-columns: 1fr;
     }
 }
@@ -772,4 +783,55 @@ main.terminal-page.sidebar-collapsed .term-item-name {
 .term-item-rename-input:focus {
     outline: none;
     box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+/* ── tab hovercard ─────────────────────────────────────────────────────────── */
+.term-hovercard {
+    position: fixed;
+    z-index: 60;
+    max-width: 340px;
+    padding: 8px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg);
+    box-shadow: var(--shadow-lg);
+    font-family: var(--font-mono);
+    pointer-events: none;
+}
+/* display:flex above outranks the UA [hidden] rule, so hoverEl.hidden alone
+   wouldn't hide it — this companion rule is what actually toggles it off. */
+.term-hovercard[hidden] {
+    display: none;
+}
+.term-hovercard-title {
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--ink);
+    overflow-wrap: anywhere;
+}
+.term-hovercard-summary {
+    font-size: 0.72rem;
+    font-style: italic;
+    color: var(--ink);
+    opacity: 0.85;
+    overflow-wrap: anywhere;
+}
+.term-hovercard-cwd {
+    font-size: 0.68rem;
+    color: var(--muted);
+    overflow-wrap: anywhere;
+}
+.term-hovercard-notif {
+    font-size: 0.7rem;
+    color: var(--red);
+    overflow-wrap: anywhere;
+}
+.term-hovercard-hint {
+    margin-top: 2px;
+    font-size: 0.62rem;
+    color: var(--muted);
+    opacity: 0.7;
 }

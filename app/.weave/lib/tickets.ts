@@ -126,7 +126,7 @@ const STUCK_RE = /^###\s+Stuck Reason\b/m;
  *  and non-empty; otherwise fall back to the canonical per-bucket sentence.
  *  The override is written by ticket-manager skill ops at each lifecycle
  *  transition (see SKILL.md). */
-function resolveNextStepHint(
+export function resolveNextStepHint(
   fm: Frontmatter,
   bucket: Bucket,
   body: string,

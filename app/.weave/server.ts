@@ -1,5 +1,6 @@
 import { join, resolve, sep } from "node:path";
 import { readFile, stat, readdir } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { PORT, REPO_ROOT } from "./weave.config.ts";
 import {
   BUCKETS,
@@ -272,7 +273,16 @@ async function buildOpenCommand(relPath: unknown, line: number | null): Promise<
   if (!st || !st.isFile()) throw new Error("file not found");
   const shq = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
   const at = line && line > 0 ? `+${Math.floor(line)} ` : "";
-  return `vim ${at}-- ${shq(resolved)}`;
+  // Experiment: launch MacVim's GUI (mvim) instead of terminal vim, to sidestep
+  // the browser/xterm scroll-rendering issues. Guarded: mvim is macOS-only and
+  // often not installed, so fall back to terminal vim rather than typing a
+  // command that just fails in the fresh terminal. (Bun.which sees the SERVER's
+  // PATH — possibly narrower than the login shell's — so also probe the usual
+  // Homebrew/locals like rgBin does; a false negative only means plain vim.)
+  const hasMvim =
+    Bun.which("mvim") !== null ||
+    ["/opt/homebrew/bin/mvim", "/usr/local/bin/mvim"].some((p) => existsSync(p));
+  return `${hasMvim ? "mvim" : "vim"} ${at}-- ${shq(resolved)}`;
 }
 
 // Coerce a JSON `line` field to a positive int, else null.

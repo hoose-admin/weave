@@ -142,12 +142,46 @@ function dashboardPort(): string {
   return process.env.WEAVE_PORT || String(PORT);
 }
 
+// ── ttyd client TERM (scroll-render workaround) ──────────────────────────────
+// tmux 3.7a has a timing-sensitive bug on its optimized scroll-region output
+// path: under ttyd's pty drain cadence, a rapid burst of full-screen-app scrolls
+// (vim Ctrl-D/Ctrl-U, `less`, …) leaves the browser terminal with stale blank
+// bands that never self-heal — tmux believes the client is current (verified:
+// #{client_written} == bytes received, #{client_discarded} == 0, yet most rows
+// were never sent; the same burst to a plain pty client arrives complete, and
+// `tmux refresh-client` repaints every hole). Unsetting the scroll-region caps
+// (csr/indn/rin) for ttyd's clients forces tmux onto its plain line-redraw
+// path, which is correct under the same burst — at the cost of more redraw
+// bytes on a localhost pipe (~5×, negligible).
+//
+// Scoping: `terminal-overrides` is a SERVER option, and weave must not degrade
+// the user's other tmux clients (iTerm etc. advertise xterm-256color). So ttyd
+// clients advertise TERM=tmux-256color instead — a standard terminfo entry
+// that, on this server, only weave's browser terminals use — and the override
+// is APPENDED (-a) keyed to exactly that TERM, preserving anything the user
+// set. Systems whose terminfo lacks tmux-256color fall back to xterm-256color:
+// terminal works, workaround inactive.
+const TTYD_TERM_OVERRIDE = "tmux-256color:csr@:indn@:rin@";
+let ttydTermCache: string | null = null;
+function ttydTerm(): string {
+  if (ttydTermCache) return ttydTermCache;
+  let ok = false;
+  try {
+    ok = Bun.spawnSync(["infocmp", "tmux-256color"], { stdout: "ignore", stderr: "ignore" }).exitCode === 0;
+  } catch {
+    /* infocmp missing — fall back */
+  }
+  ttydTermCache = ok ? "tmux-256color" : "xterm-256color";
+  return ttydTermCache;
+}
+
 function ttydArgs(tmuxName: string, port: number, cwd: string, title: string, id: string): string[] {
   return [
     "ttyd",
     "-p", String(port),
     "-i", HOST,            // localhost-only — ttyd defaults to 0.0.0.0
     "-W",                  // writable / interactive
+    "-T", ttydTerm(),      // distinct TERM so the scroll workaround targets only us
     "-t", "fontSize=14",
     "-t", `titleFixed=${title}`,
     "-t", "disableLeaveAlert=true",
@@ -207,6 +241,25 @@ async function applySessionOptions(tmuxName: string): Promise<void> {
     }).exited;
   try {
     await setOpt("mouse", "on");
+    // Scroll-region workaround (rationale at ttydTerm above). Server-scoped by
+    // necessity (terminal-overrides has no session scope) but keyed to the TERM
+    // only weave's ttyd clients advertise, and APPENDED so user-set overrides
+    // survive. Idempotent: skipped once the entry is present. Re-asserted here
+    // (create + reconcile) because the tmux server may be freshly started.
+    if (ttydTerm() === "tmux-256color") {
+      const show = Bun.spawn(["tmux", "show-options", "-sv", "terminal-overrides"], {
+        stdout: "pipe",
+        stderr: "ignore",
+      });
+      const cur = await new Response(show.stdout).text();
+      await show.exited;
+      if (!cur.includes("tmux-256color:csr@")) {
+        await Bun.spawn(["tmux", "set-option", "-sa", "terminal-overrides", TTYD_TERM_OVERRIDE], {
+          stdout: "ignore",
+          stderr: "ignore",
+        }).exited;
+      }
+    }
     await setOpt("status-style", `bg=${STATUS_BG},fg=${STATUS_FG}`);
     await setOpt("status-left", `#[fg=${STATUS_ACCENT},bold] #{b:pane_current_path} #[fg=${STATUS_FG}]│`);
     await setOpt("status-left-length", "40");

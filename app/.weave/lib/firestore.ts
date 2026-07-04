@@ -53,7 +53,7 @@ import { parse, type Frontmatter } from "./frontmatter.ts";
 import {
   BUCKETS,
   STATUS_FOR_BUCKET,
-  nextStepHintFor,
+  resolveNextStepHint,
   findTicket,
   type Bucket,
 } from "./tickets.ts";
@@ -178,8 +178,17 @@ async function tokenFromAdcFile(): Promise<TokenCache | null> {
 async function gcloudToken(args: string[]): Promise<TokenCache | null> {
   try {
     if (typeof Bun === "undefined") return null;
-    const proc = Bun.spawn(["gcloud", ...args], { stdout: "pipe", stderr: "pipe" });
-    const [out] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+    const proc = Bun.spawn(["gcloud", ...args], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+    // gcloud can wedge (a re-auth prompt, a hung metadata server). Every fetch in
+    // this file is timeout-guarded; bound the subprocess the same way, and drain
+    // BOTH pipes so a chatty stderr can't fill its buffer and block us.
+    const timer = setTimeout(() => { try { proc.kill(); } catch { /* already gone */ } }, 15_000);
+    const [out] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    clearTimeout(timer);
     if (proc.exitCode !== 0) return null;
     const token = out.trim();
     if (!token) return null;
@@ -249,8 +258,6 @@ type TicketDoc = {
 };
 
 const TKT_RE = /^TKT-(\d+)-.*\.md$/;
-const PASS2_RE = /^###\s+Pass-2 review\b/m;
-const STUCK_RE = /^###\s+Stuck Reason\b/m;
 
 function asStrArray(v: unknown): string[] {
   return Array.isArray(v) ? v.map((x) => String(x)) : [];
@@ -270,13 +277,9 @@ function buildDoc(fm: Frontmatter, bucket: Bucket, filename: string, body: strin
   const m = filename.match(TKT_RE);
   const idStr = str(fm.id);
   const ticketId = idStr ?? (m ? `TKT-${m[1]}` : filename.replace(/\.md$/, ""));
-  const override = typeof fm.next_step_hint === "string" ? fm.next_step_hint.trim() : "";
-  const nextStep =
-    override ||
-    nextStepHintFor(bucket, {
-      hasPass2: PASS2_RE.test(body),
-      hasStuckReason: STUCK_RE.test(body),
-    });
+  // Shared with the dashboard's own view (tickets.ts) so the mirrored hint — and
+  // therefore the content hash — can never drift from what the board shows.
+  const nextStep = resolveNextStepHint(fm, bucket, body);
   return {
     docId: docIdFor(ticketId),
     board: C().board,
@@ -450,14 +453,17 @@ async function syncBoardCore(): Promise<SyncBoardResult> {
   const s = state();
   const seen = new Set<string>();
   const changed: TicketDoc[] = [];
+  const hashes = new Map<string, string>(); // computed once, reused on write-back
   for (const d of docs) {
     seen.add(d.docId);
-    if (s[d.docId] !== hashDoc(d)) changed.push(d);
+    const h = hashDoc(d);
+    hashes.set(d.docId, h);
+    if (s[d.docId] !== h) changed.push(d);
   }
   const toDelete = C().prune ? Object.keys(s).filter((id) => !seen.has(id)) : [];
   if (changed.length || toDelete.length) {
     await batchWrite(token, changed, toDelete);
-    for (const d of changed) s[d.docId] = hashDoc(d);
+    for (const d of changed) s[d.docId] = hashes.get(d.docId)!;
     for (const id of toDelete) delete s[id];
     persistState();
   }

@@ -69,6 +69,29 @@ function highlightRe(query) {
     }
 }
 
+// Append `text` to `parent`, wrapping the server-supplied [start,end) char
+// ranges in <mark>. Preferred over the client RegExp: these are the exact spans
+// the search engine matched, so regex-mode highlights can't diverge. Ranges are
+// clamped/sorted defensively in case the server ever sends odd offsets.
+function appendRanges(parent, text, ranges) {
+    const spans = ranges
+        .filter((r) => Array.isArray(r) && r.length === 2 && r[1] > r[0])
+        .sort((a, b) => a[0] - b[0]);
+    let last = 0;
+    for (const [s, e] of spans) {
+        const a = Math.max(s, last);
+        const b = Math.min(e, text.length);
+        if (b <= a) continue;
+        if (a > last) parent.appendChild(document.createTextNode(text.slice(last, a)));
+        const mark = document.createElement("mark");
+        mark.className = "wsearch-mark";
+        mark.textContent = text.slice(a, b);
+        parent.appendChild(mark);
+        last = b;
+    }
+    if (last < text.length) parent.appendChild(document.createTextNode(text.slice(last)));
+}
+
 // Append `text` to `parent`, wrapping every `re` hit in <mark>. Zero-width or
 // non-global matches are handled defensively so we never loop forever.
 function appendHighlighted(parent, text, re) {
@@ -158,8 +181,13 @@ function render(data) {
                 ln.textContent = String(line.n);
                 const code = document.createElement("code");
                 code.className = "wsearch-code";
-                if (line.match) appendHighlighted(code, line.text, re);
-                else code.textContent = line.text;
+                if (line.match && Array.isArray(line.ranges) && line.ranges.length) {
+                    appendRanges(code, line.text, line.ranges);
+                } else if (line.match) {
+                    appendHighlighted(code, line.text, re);
+                } else {
+                    code.textContent = line.text;
+                }
                 row.append(ln, code);
                 body.appendChild(row);
             }

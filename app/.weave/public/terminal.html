@@ -86,7 +86,17 @@
                             aria-label="Vim tips"
                         >
                             <span class="term-tips-icon" aria-hidden="true">💡</span>
-                            <span class="term-tips-text">Tips</span>
+                            <span class="term-tips-text">Vim tips</span>
+                        </button>
+                        <button
+                            type="button"
+                            id="term-claude-tips"
+                            class="term-tips-btn"
+                            title="Claude tips"
+                            aria-label="Claude tips"
+                        >
+                            <span class="term-tips-icon" aria-hidden="true">✨</span>
+                            <span class="term-tips-text">Claude tips</span>
                         </button>
                         <span id="term-cwd-saved" class="term-cwd-saved" hidden>saved ✓</span>
                     </div>
@@ -151,32 +161,126 @@
                             <li><code>i</code> / <code>a</code><span>insert / append</span></li>
                             <li><kbd>Esc</kbd><span>back to normal mode</span></li>
                             <li><code>dd</code><span>delete line</span></li>
+                            <li><code>dw</code> / <code>dW</code><span>delete word / WORD</span></li>
+                            <li><code>dE</code><span>delete to end of WORD</span></li>
                             <li><code>yy</code> / <code>p</code><span>yank line / paste</span></li>
                             <li><code>u</code> / <code>Ctrl-r</code><span>undo / redo</span></li>
                         </ul>
                     </section>
 
+                    <div class="term-tips-cols">
+                        <section class="term-tips-section">
+                            <h4 class="term-tips-h">Move ↕ vertical</h4>
+                            <ul class="term-tips-list term-tips-list--single">
+                                <li><code>gg</code> / <code>G</code><span>top / bottom of file</span></li>
+                                <li><code>Ctrl-d</code> / <code>Ctrl-u</code><span>half-page down / up</span></li>
+                                <li><code>Ctrl-f</code> / <code>Ctrl-b</code><span>full page down / up</span></li>
+                                <li><code>{</code> / <code>}</code><span>prev / next paragraph</span></li>
+                            </ul>
+                        </section>
+
+                        <section class="term-tips-section">
+                            <h4 class="term-tips-h">Move ↔ horizontal</h4>
+                            <ul class="term-tips-list term-tips-list--single">
+                                <li><code>0</code> / <code>$</code><span>start / end of line</span></li>
+                                <li><code>^</code><span>first non-blank char</span></li>
+                                <li><code>w</code> / <code>b</code><span>next / prev word</span></li>
+                                <li><code>e</code><span>end of word</span></li>
+                                <li><code>%</code><span>jump to matching ( ) [ ] { }</span></li>
+                            </ul>
+                        </section>
+                    </div>
+
                     <section class="term-tips-section">
-                        <h4 class="term-tips-h">Move &amp; search</h4>
+                        <h4 class="term-tips-h">Search &amp; replace</h4>
                         <ul class="term-tips-list">
-                            <li><code>gg</code> / <code>G</code><span>top / bottom of file</span></li>
-                            <li><code>0</code> / <code>$</code><span>start / end of line</span></li>
                             <li><code>/text</code> then <kbd>n</kbd><span>search, next match</span></li>
                             <li><code>:%s/old/new/g</code><span>replace all</span></li>
                         </ul>
                     </section>
+                </div>
 
-                    <section class="term-tips-section">
-                        <h4 class="term-tips-h">
-                            Search all files (VSCode ⌘⇧F)
-                        </h4>
-                        <ul class="term-tips-list">
-                            <li><code>:vimgrep /text/ **/*</code><span>recursive project search</span></li>
-                            <li><code>:copen</code><span>open results list</span></li>
-                            <li><code>:cn</code> / <code>:cp</code><span>next / prev match</span></li>
-                            <li><code>:grep -r text .</code><span>same, via external grep</span></li>
-                        </ul>
-                    </section>
+                <footer class="modal-foot">
+                    <button
+                        type="button"
+                        class="btn btn--secondary"
+                        data-modal-close
+                    >
+                        Close
+                    </button>
+                </footer>
+            </div>
+        </div>
+
+        <!-- Claude tips modal: toggled by #term-claude-tips, wired in terminal.js. -->
+        <div class="modal" id="term-claude-tips-modal" hidden>
+            <div class="modal-backdrop" data-modal-close></div>
+            <div class="modal-card term-tips-card">
+                <header class="modal-head">
+                    <h3>Claude slash commands</h3>
+                    <button
+                        type="button"
+                        class="close-btn"
+                        data-modal-close
+                        aria-label="Close"
+                    >
+                        ×
+                    </button>
+                </header>
+
+                <div class="modal-body term-tips-body">
+                    <div class="term-tips-hero">
+                        <code class="term-tips-key">/</code>
+                        <div class="term-tips-hero-text">
+                            Type <code>/</code> at the start of the prompt to see
+                            every command with autocomplete. These are the ones
+                            you'll reach for most.
+                        </div>
+                    </div>
+
+                    <div class="term-tips-cols">
+                        <section class="term-tips-section">
+                            <h4 class="term-tips-h">Context &amp; session</h4>
+                            <ul class="term-tips-list term-tips-list--single">
+                                <li><code>/clear</code><span>wipe history, reset context</span></li>
+                                <li><code>/compact</code><span>summarize &amp; keep going</span></li>
+                                <li><code>/rename</code><span>rename this session</span></li>
+                                <li><code>/resume</code><span>reopen a past session</span></li>
+                                <li><code>/cost</code><span>tokens &amp; cost used</span></li>
+                            </ul>
+                        </section>
+
+                        <section class="term-tips-section">
+                            <h4 class="term-tips-h">Model &amp; output</h4>
+                            <ul class="term-tips-list term-tips-list--single">
+                                <li><code>/model</code><span>switch Claude model</span></li>
+                                <li><code>/effort</code><span>set reasoning effort</span></li>
+                                <li><code>/fast</code><span>toggle fast mode</span></li>
+                            </ul>
+                        </section>
+                    </div>
+
+                    <div class="term-tips-cols">
+                        <section class="term-tips-section">
+                            <h4 class="term-tips-h">Extend &amp; configure</h4>
+                            <ul class="term-tips-list term-tips-list--single">
+                                <li><code>/plugin</code><span>install / manage plugins</span></li>
+                                <li><code>/mcp</code><span>manage MCP servers</span></li>
+                                <li><code>/agents</code><span>manage subagents</span></li>
+                                <li><code>/config</code><span>open settings</span></li>
+                            </ul>
+                        </section>
+
+                        <section class="term-tips-section">
+                            <h4 class="term-tips-h">Project &amp; help</h4>
+                            <ul class="term-tips-list term-tips-list--single">
+                                <li><code>/init</code><span>write a CLAUDE.md</span></li>
+                                <li><code>/review</code><span>review a PR / diff</span></li>
+                                <li><code>/memory</code><span>edit memory files</span></li>
+                                <li><code>/help</code><span>list every command</span></li>
+                            </ul>
+                        </section>
+                    </div>
                 </div>
 
                 <footer class="modal-foot">

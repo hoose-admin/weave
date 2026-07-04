@@ -42,10 +42,11 @@ const enc = new TextEncoder();
 const dec = new TextDecoder();
 
 // ── color scheme ──────────────────────────────────────────────────────────
-// The palette is one of the named schemes in terminal-schemes.js (GitHub Dark,
-// Catppuccin, Dracula, Nord, Solarized), chosen in the dashboard toolbar and
-// stored in localStorage under WEAVE_TERM_SCHEME_KEY. Each scheme is a complete,
-// fixed look — surface AND all 16 ANSI colors — and does NOT follow the
+// The palette is one of the named schemes in terminal-schemes.js (Evening,
+// GitHub Dark, Catppuccin, Dracula, Nord, Solarized), chosen in the dashboard
+// toolbar and stored in localStorage under WEAVE_TERM_SCHEME_KEY. Each scheme is
+// a complete, fixed look — surface AND all 16 ANSI colors — and does NOT follow
+// the
 // dashboard's light/dark toggle (so, unlike before, we don't read `weave-theme`
 // here). The parent writes the choice and the same-origin `storage` event below
 // recolors us live, no reload.
@@ -96,6 +97,11 @@ term.loadAddon(fit);
 
 const mount = document.getElementById("term");
 term.open(mount);
+// Canvas renderer: xterm's default DOM renderer blanks the viewport when a
+// full-screen app (vim) is scrolled via the mouse wheel. The canvas addon
+// replaces it (must load after open()), fixing the repaint without the WebGL
+// addon's per-iframe GPU-context ceiling. See vendor/addon-canvas.js.
+term.loadAddon(new CanvasAddon.CanvasAddon());
 applyScheme();
 safeFit();
 

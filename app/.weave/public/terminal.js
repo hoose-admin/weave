@@ -29,6 +29,8 @@ const collapseBtn = document.getElementById("term-collapse");
 const schemeSelect = document.getElementById("term-scheme");
 const tipsBtn = document.getElementById("term-tips");
 const tipsModal = document.getElementById("term-tips-modal");
+const claudeTipsBtn = document.getElementById("term-claude-tips");
+const claudeTipsModal = document.getElementById("term-claude-tips-modal");
 const utilsToggle = document.getElementById("term-utils-toggle");
 const utilsPanel = document.getElementById("term-utils");
 
@@ -337,6 +339,153 @@ async function persistOrder() {
 
 // A search tab: search glyph + editable title + slide-to-close, no status dot or
 // fork (it has no live session). Reuses the terminal item chrome/classes.
+// ── tab hovercard ─────────────────────────────────────────────────────────────
+
+// A floating card shown on tab hover/focus with the tab's FULL title, what its
+// session is working on, and its cwd — the un-clipped version of the one-line
+// label. Replaces the native `title=` tooltip, whose ~0.5s reveal delay is fixed
+// by the OS and can't be styled; this shows after HOVERCARD_DELAY_MS and is
+// keyboard-reachable (focus). One shared element, positioned beside the hovered
+// tab and clamped to the viewport; pointer-events:none so it never eats a click.
+const HOVERCARD_DELAY_MS = 500; // 0.5s — the first-hover reveal delay
+let hoverEl = null;
+let hoverTimer = null;
+let hoverId = null; // id the card is currently showing for
+let hoverPendingId = null; // id armed but not yet shown (delay in flight)
+let hoverPointer = false; // the pending focus change is pointer-driven → don't focus-show
+
+function ensureHovercard() {
+    if (hoverEl) return hoverEl;
+    hoverEl = document.createElement("div");
+    hoverEl.className = "term-hovercard";
+    hoverEl.hidden = true;
+    document.body.appendChild(hoverEl);
+    return hoverEl;
+}
+
+function hovercardRow(cls, text) {
+    const el = document.createElement("div");
+    el.className = cls;
+    el.textContent = text;
+    return el;
+}
+
+// Fill the card from the latest payload for `id`, then place it beside `li`.
+// Only rows that carry text are rendered.
+function showHovercard(li, id) {
+    const s = lastSessions.find((x) => x.id === id);
+    if (!s) return;
+    const card = ensureHovercard();
+    card.replaceChildren();
+
+    card.appendChild(hovercardRow("term-hovercard-title", s.title || "terminal"));
+    // The same summary the sub-line clips — shown here in full.
+    const { text, isSummary } = subInfo(s);
+    if (isSummary && text) card.appendChild(hovercardRow("term-hovercard-summary", text));
+    if (s.cwd) card.appendChild(hovercardRow("term-hovercard-cwd", s.cwd));
+    if (s.notification && s.notification.message) {
+        card.appendChild(hovercardRow("term-hovercard-notif", s.notification.message));
+    }
+
+    // Reveal off-screen first so we can measure it, then place it — no flash at a
+    // stale position.
+    card.style.left = "-9999px";
+    card.style.top = "0px";
+    card.hidden = false;
+    positionHovercard(li);
+}
+
+// Sit the card just right of the tab (the sidebar is on the left); flip to the
+// left and clamp if it would run off-screen.
+function positionHovercard(li) {
+    const card = ensureHovercard();
+    const r = li.getBoundingClientRect();
+    const cw = card.offsetWidth;
+    const ch = card.offsetHeight;
+    const gap = 8;
+    let left = r.right + gap;
+    if (left + cw > window.innerWidth - 8) left = r.left - gap - cw; // no room right → flip left
+    if (left < 8) left = 8;
+    let top = Math.min(r.top, window.innerHeight - 8 - ch);
+    if (top < 8) top = 8;
+    card.style.left = left + "px";
+    card.style.top = top + "px";
+}
+
+function hideHovercard() {
+    if (hoverTimer) {
+        clearTimeout(hoverTimer);
+        hoverTimer = null;
+    }
+    hoverPendingId = null;
+    hoverId = null;
+    if (hoverEl) hoverEl.hidden = true;
+}
+
+// Delegated hover + focus wiring on the persistent list element (wired once). The
+// HOVERCARD_DELAY_MS arm only gates the FIRST reveal so quick passes don't flash
+// the card; once a card is up, moving to another tab switches instantly. Focus
+// shows it at once for keyboard users. A drag, mousedown, or scroll dismisses it.
+function wireHovercard() {
+    listEl.addEventListener("mouseover", (e) => {
+        if (draggingId) return;
+        const li = e.target.closest(".term-item");
+        if (!li) return;
+        const id = li.dataset.id;
+        if (id === hoverId || id === hoverPendingId) return; // already showing/arming this tab
+        if (hoverTimer) {
+            clearTimeout(hoverTimer);
+            hoverTimer = null;
+        }
+        if (hoverEl && !hoverEl.hidden) {
+            hoverPendingId = null; // a card is already up — switch tabs with no delay
+            hoverId = id;
+            showHovercard(li, id);
+            return;
+        }
+        hoverPendingId = id;
+        hoverTimer = setTimeout(() => {
+            hoverTimer = null;
+            hoverPendingId = null;
+            hoverId = id;
+            showHovercard(li, id);
+        }, HOVERCARD_DELAY_MS);
+    });
+    listEl.addEventListener("mouseout", (e) => {
+        const to = e.relatedTarget;
+        if (to && to.closest && to.closest(".term-item")) return; // moved onto another tab
+        hideHovercard();
+    });
+    listEl.addEventListener("focusin", (e) => {
+        if (hoverPointer) return; // a click focused this tab — the hover path owns mouse
+        const li = e.target.closest(".term-item");
+        if (!li) return;
+        if (hoverTimer) {
+            clearTimeout(hoverTimer);
+            hoverTimer = null;
+        }
+        hoverPendingId = null;
+        hoverId = li.dataset.id;
+        showHovercard(li, li.dataset.id);
+    });
+    listEl.addEventListener("focusout", (e) => {
+        const to = e.relatedTarget;
+        if (to && to.closest && to.closest(".term-item")) return;
+        hideHovercard();
+    });
+    // A click focuses the tab button; flag it so the ensuing focusin doesn't
+    // pop the card on every click. Cleared next tick (focusin runs synchronously
+    // right after mousedown, before this timer).
+    listEl.addEventListener("mousedown", () => {
+        hoverPointer = true;
+        setTimeout(() => {
+            hoverPointer = false;
+        }, 0);
+        hideHovercard();
+    });
+    window.addEventListener("scroll", hideHovercard, true);
+}
+
 function renderSearchItem(tab) {
     const li = document.createElement("li");
     li.className = "term-item is-search";
@@ -371,6 +520,7 @@ function renderSearchItem(tab) {
 }
 
 function renderList(tabs) {
+    hideHovercard(); // the hovered <li> is about to be torn down
     listEl.replaceChildren();
     for (const s of tabs) {
         ensureFrame(s); // pre-mount so connections persist while switching
@@ -395,7 +545,8 @@ function renderList(tabs) {
         const label = document.createElement("button");
         label.type = "button";
         label.className = "term-item-label";
-        label.title = s.title; // identifies the tab when collapsed to a numbered square
+        // Full title/summary/cwd surface on hover via the tab hovercard (no native
+        // title= — its ~0.5s OS delay isn't tunable and it can't be styled).
 
         const name = document.createElement("span");
         name.className = "term-item-name";
@@ -419,7 +570,6 @@ function renderList(tabs) {
         sub.className = "term-item-cwd";
         const { text, isSummary } = subInfo(s);
         sub.textContent = text;
-        sub.title = text;
         if (isSummary) sub.classList.add("is-summary");
 
         label.append(name, sub);
@@ -479,13 +629,17 @@ function patchStatus(sessions) {
         if (sub) {
             const { text, isSummary } = subInfo(s);
             sub.textContent = text;
-            sub.title = text;
             sub.classList.toggle("is-summary", isSummary);
         }
         // Keep the fork button in sync without a full re-render — a bare shell that
         // just started `claude` gains a sessionId mid-poll, which should enable it.
         const fork = li.querySelector(".term-item-fork");
         if (fork) applyForkState(fork, s);
+    }
+    // Keep an open hovercard's summary live as polls land (patch keeps the <li>).
+    if (hoverId && hoverEl && !hoverEl.hidden) {
+        const li = listEl.querySelector(`.term-item[data-id="${hoverId}"]`);
+        if (li) showHovercard(li, hoverId);
     }
 }
 
@@ -964,18 +1118,21 @@ wireSchemePicker();
 newBtn.addEventListener("click", () => createSession(cwdInput.value.trim()));
 if (searchNewBtn) searchNewBtn.addEventListener("click", newSearchTab);
 
-// ── vim tips modal ────────────────────────────────────────────────────────────
-if (tipsBtn && tipsModal) {
-    tipsBtn.addEventListener("click", () => {
-        tipsModal.hidden = false;
+// ── tips modals (vim + claude) ─────────────────────────────────────────────────
+function wireTipsModal(btn, modal) {
+    if (!btn || !modal) return;
+    btn.addEventListener("click", () => {
+        modal.hidden = false;
     });
-    tipsModal.addEventListener("click", (e) => {
-        if (e.target.matches("[data-modal-close]")) tipsModal.hidden = true;
+    modal.addEventListener("click", (e) => {
+        if (e.target.matches("[data-modal-close]")) modal.hidden = true;
     });
     document.addEventListener("keydown", (e) => {
-        if (e.key === "Escape" && !tipsModal.hidden) tipsModal.hidden = true;
+        if (e.key === "Escape" && !modal.hidden) modal.hidden = true;
     });
 }
+wireTipsModal(tipsBtn, tipsModal);
+wireTipsModal(claudeTipsBtn, claudeTipsModal);
 
 cwdForm.addEventListener("submit", (e) => {
     e.preventDefault();
@@ -989,5 +1146,6 @@ cwdForm.addEventListener("submit", (e) => {
 });
 
 wireListDnd(); // once — the list element persists across renders
+wireHovercard(); // once — delegated hover/focus on the persistent list element
 load();
 setInterval(refresh, POLL_MS);

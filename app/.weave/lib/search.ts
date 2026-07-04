@@ -1,15 +1,19 @@
 // Project-wide text search backing the terminal "Search" tab (Zed ⌘⇧F style).
 // Shells out to ripgrep rooted at REPO_ROOT; falls back to `git grep` when rg
 // isn't installed. Returns matches grouped by file into contiguous hunks with
-// ±CONTEXT lines of surrounding context. Highlight offsets are computed on the
-// client (it rebuilds the query as a RegExp), so this layer only flags which
-// lines matched — keeping the rg and git-grep paths identical in shape.
+// ±CONTEXT lines of surrounding context. When ripgrep is used, exact highlight
+// offsets come from its submatch data (so regex highlighting reflects what the
+// engine actually matched); the client falls back to rebuilding the query as a
+// RegExp only when the server didn't supply ranges (the git-grep path). Either
+// way a matched line is flagged with `match:true`.
 //
 // Safety: the query is passed as an argv element (never a shell string, so no
 // injection), the subprocess is killed on a global match/file cap, and a hard
 // timeout kills a runaway search.
 
 import { existsSync } from "node:fs";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { REPO_ROOT } from "../weave.config.ts";
 
 // The absolute directory every search is rooted at — surfaced in the search tab
@@ -30,7 +34,9 @@ function rgBin(): string | null {
   return null;
 }
 
-export type ResultLine = { n: number; text: string; match: boolean };
+// `ranges` (present only on match lines, and only when the engine supplied exact
+// spans) holds [start,end) CHARACTER offsets into `text` to wrap in <mark>.
+export type ResultLine = { n: number; text: string; match: boolean; ranges?: [number, number][] };
 export type Hunk = ResultLine[];
 export type FileResult = { file: string; hunks: Hunk[]; matches: number };
 
@@ -81,6 +87,29 @@ function stripEol(s: string): string {
   return s.replace(/\r?\n$/, "");
 }
 
+const ENC = new TextEncoder();
+const DEC = new TextDecoder();
+
+// rg reports each match span as BYTE offsets into the line; convert them to JS
+// string (char) indices so the client can highlight exactly what rg matched —
+// correct for regex mode too, where a client-rebuilt RegExp would diverge from
+// rg's engine. Returns undefined (→ client falls back) when there's nothing
+// usable, e.g. offsets past a max-columns-truncated preview line.
+function submatchRanges(text: string, subs: unknown): [number, number][] | undefined {
+  if (!Array.isArray(subs) || !subs.length) return undefined;
+  const bytes = ENC.encode(text);
+  const out: [number, number][] = [];
+  for (const s of subs) {
+    const a = s?.start, b = s?.end;
+    if (typeof a !== "number" || typeof b !== "number") continue;
+    if (a < 0 || b > bytes.length || b <= a) continue;
+    const cs = DEC.decode(bytes.subarray(0, a)).length;
+    const ce = DEC.decode(bytes.subarray(0, b)).length;
+    if (ce > cs) out.push([cs, ce]);
+  }
+  return out.length ? out : undefined;
+}
+
 // ── ripgrep (primary) ─────────────────────────────────────────────────────────
 
 async function searchRg(rg: string, opts: SearchOpts): Promise<SearchResponse> {
@@ -99,14 +128,14 @@ async function searchRg(rg: string, opts: SearchOpts): Promise<SearchResponse> {
   args.push("-e", opts.query, ".");
 
   const proc = Bun.spawn([rg, ...args], { cwd: REPO_ROOT, stdout: "pipe", stderr: "ignore" });
-  const timer = setTimeout(() => {
-    try { proc.kill(); } catch { /* already gone */ }
-  }, TIMEOUT_MS);
-
   const files: FileResult[] = [];
   let cur: { file: string; lines: ResultLine[] } | null = null;
   let totalMatches = 0;
   let truncated = false;
+  const timer = setTimeout(() => {
+    truncated = true; // a wall-clock cut-off is a partial result — tell the UI
+    try { proc.kill(); } catch { /* already gone */ }
+  }, TIMEOUT_MS);
 
   const flush = () => {
     if (cur && cur.lines.length) files.push(buildFile(cur.file, cur.lines));
@@ -134,7 +163,8 @@ async function searchRg(rg: string, opts: SearchOpts): Promise<SearchResponse> {
         if (typeof n !== "number") continue;
         const text = stripEol(ev.data?.lines?.text ?? "");
         const isMatch = ev.type === "match";
-        cur.lines.push({ n, text, match: isMatch });
+        const ranges = isMatch ? submatchRanges(text, ev.data?.submatches) : undefined;
+        cur.lines.push({ n, text, match: isMatch, ranges });
         if (isMatch && ++totalMatches >= MAX_MATCHES) { truncated = true; break outer; }
       } else if (ev.type === "end") {
         flush();
@@ -163,38 +193,50 @@ async function searchGitGrep(opts: SearchOpts): Promise<SearchResponse> {
   args.push(opts.regex ? "-E" : "-F");
   if (!opts.caseSensitive) args.push("-i");
   args.push("-e", opts.query, "--", ".");
+  // Parity with rg's -g '!dir': --exclude-standard only honours .gitignore, so a
+  // *tracked* heavy/generated dir would still be searched — exclude them by glob
+  // pathspec (matches at any depth) so both engines cover the same tree.
+  for (const d of EXCLUDE_DIRS) args.push(`:(exclude,glob)**/${d}/**`, `:(exclude,glob)${d}/**`);
 
   const proc = Bun.spawn(["git", ...args], { cwd: REPO_ROOT, stdout: "pipe", stderr: "ignore" });
-  const timer = setTimeout(() => {
-    try { proc.kill(); } catch { /* already gone */ }
-  }, TIMEOUT_MS);
 
-  const out = await new Response(proc.stdout).text();
-  clearTimeout(timer);
-
-  // Group matched line numbers per file, respecting the caps.
+  // Group matched line numbers per file, respecting the caps. Stream and kill
+  // early on a cap (like the rg path) so a huge repo can't buffer unbounded.
   const byFile = new Map<string, number[]>();
   const order: string[] = [];
   let totalMatches = 0;
   let truncated = false;
-  const lineRe = /^(.+?):(\d+):/;
-  for (const line of out.split("\n")) {
-    if (!line) continue;
-    const m = lineRe.exec(line);
-    if (!m) continue;
-    const file = m[1];
-    const n = parseInt(m[2], 10);
-    if (!byFile.has(file)) {
-      if (byFile.size >= MAX_FILES) { truncated = true; break; }
-      byFile.set(file, []);
-      order.push(file);
-    }
-    byFile.get(file)!.push(n);
-    if (++totalMatches >= MAX_MATCHES) { truncated = true; break; }
-  }
+  const timer = setTimeout(() => {
+    truncated = true; // a wall-clock cut-off is a partial result — tell the UI
+    try { proc.kill(); } catch { /* already gone */ }
+  }, TIMEOUT_MS);
 
-  const { readFile } = await import("node:fs/promises");
-  const { join } = await import("node:path");
+  const lineRe = /^(.+?):(\d+):/;
+  const decoder = new TextDecoder();
+  let buf = "";
+  outer: for await (const chunk of proc.stdout as AsyncIterable<Uint8Array>) {
+    buf += decoder.decode(chunk, { stream: true });
+    let nl: number;
+    while ((nl = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, nl);
+      buf = buf.slice(nl + 1);
+      if (!line) continue;
+      const m = lineRe.exec(line);
+      if (!m) continue;
+      const file = m[1];
+      const n = parseInt(m[2], 10);
+      if (!byFile.has(file)) {
+        if (byFile.size >= MAX_FILES) { truncated = true; break outer; }
+        byFile.set(file, []);
+        order.push(file);
+      }
+      byFile.get(file)!.push(n);
+      if (++totalMatches >= MAX_MATCHES) { truncated = true; break outer; }
+    }
+  }
+  clearTimeout(timer);
+  try { proc.kill(); } catch { /* already exited */ }
+
   const files: FileResult[] = [];
   for (const file of order) {
     let content = "";
@@ -227,15 +269,19 @@ async function searchGitGrep(opts: SearchOpts): Promise<SearchResponse> {
 export async function runSearch(opts: SearchOpts): Promise<SearchResponse> {
   const q = opts.query.trim();
   if (!q) {
-    return { query: opts.query, regex: opts.regex, caseSensitive: opts.caseSensitive, engine: "", files: [], totalMatches: 0, totalFiles: 0, truncated: false };
+    return { query: q, regex: opts.regex, caseSensitive: opts.caseSensitive, engine: "", files: [], totalMatches: 0, totalFiles: 0, truncated: false };
   }
+  // Search, echo, and client-side highlighting all key off the same trimmed
+  // query — otherwise leading/trailing spaces would search literally yet the UI
+  // would highlight the un-spaced form (or vice-versa) and the two misalign.
+  const norm: SearchOpts = { ...opts, query: q };
   const rg = rgBin();
   if (rg) {
     try {
-      return await searchRg(rg, opts);
+      return await searchRg(rg, norm);
     } catch {
       // rg present but failed to spawn/parse — fall through to git grep.
     }
   }
-  return await searchGitGrep(opts);
+  return await searchGitGrep(norm);
 }
