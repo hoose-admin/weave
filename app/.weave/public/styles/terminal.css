@@ -79,6 +79,13 @@ main.terminal-page.sidebar-collapsed {
     border-color: var(--accent);
     color: var(--accent);
 }
+.term-search-btn {
+    width: 30px;
+    padding: 0;
+}
+.term-search-icon {
+    font-size: 1.35rem;
+}
 .term-bar-row2 {
     display: flex;
     align-items: center;
@@ -636,6 +643,7 @@ main.terminal-page.sidebar-collapsed .term-item-name {
 }
 .term-utils-row {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 8px;
 }

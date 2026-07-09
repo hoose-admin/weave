@@ -31,18 +31,8 @@
                         <span class="term-new-icon" aria-hidden="true">+</span>
                         <span class="term-new-text">Terminal</span>
                     </button>
-                    <button type="button" id="term-search-new" class="term-btn term-search-btn" title="New project search (⌘⇧F)">
-                        <span class="term-new-icon" aria-hidden="true">⌕</span>
-                        <span class="term-new-text">Search</span>
-                    </button>
-                    <button
-                        type="button"
-                        id="term-redraw"
-                        class="term-tool-btn term-caret-btn"
-                        title="Redraw terminal (fix a stale or garbled display)"
-                        aria-label="Redraw terminal"
-                    >
-                        <span aria-hidden="true">⟳</span>
+                    <button type="button" id="term-search-new" class="term-btn term-search-btn" title="New project search (⌘⇧F)" aria-label="New project search">
+                        <span class="term-search-icon" aria-hidden="true">⌕</span>
                     </button>
                     <button
                         type="button"
@@ -106,6 +96,16 @@
                         >
                             <span class="term-tips-icon" aria-hidden="true">✨</span>
                             <span class="term-tips-text">Claude tips</span>
+                        </button>
+                        <button
+                            type="button"
+                            id="term-redraw"
+                            class="term-tips-btn"
+                            title="Redraw terminal (fix a stale or garbled display)"
+                            aria-label="Redraw terminal"
+                        >
+                            <span class="term-tips-icon" aria-hidden="true">⟳</span>
+                            <span class="term-tips-text">Redraw</span>
                         </button>
                         <span id="term-cwd-saved" class="term-cwd-saved" hidden>saved ✓</span>
                     </div>
