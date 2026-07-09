@@ -15,8 +15,8 @@
 
 import { join, isAbsolute, basename } from "node:path";
 import { readdir, readFile, writeFile, mkdir, unlink } from "node:fs/promises";
-import { existsSync, statSync } from "node:fs";
-import { homedir } from "node:os";
+import { existsSync, statSync, writeFileSync, unlinkSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { REPO_ROOT, PORT } from "../weave.config.ts";
 import { allocPort, portFree, waitForPortOccupied } from "./ports.ts";
 
@@ -142,36 +142,62 @@ function dashboardPort(): string {
   return process.env.WEAVE_PORT || String(PORT);
 }
 
-// ── ttyd client TERM (scroll-render workaround) ──────────────────────────────
-// tmux 3.7a has a timing-sensitive bug on its optimized scroll-region output
-// path: under ttyd's pty drain cadence, a rapid burst of full-screen-app scrolls
-// (vim Ctrl-D/Ctrl-U, `less`, …) leaves the browser terminal with stale blank
-// bands that never self-heal — tmux believes the client is current (verified:
-// #{client_written} == bytes received, #{client_discarded} == 0, yet most rows
-// were never sent; the same burst to a plain pty client arrives complete, and
-// `tmux refresh-client` repaints every hole). Unsetting the scroll-region caps
-// (csr/indn/rin) for ttyd's clients forces tmux onto its plain line-redraw
-// path, which is correct under the same burst — at the cost of more redraw
-// bytes on a localhost pipe (~5×, negligible).
+// ── ttyd client TERM (a weave-scoped xterm terminfo) ─────────────────────────
+// The browser terminal is xterm.js — xterm-compatible — so tmux's OUTER client
+// TERM must describe xterm. The previous value, tmux-256color, is the terminfo
+// for programs running *inside* tmux; using it on the outside made tmux drive
+// the browser with the wrong capabilities (no bce, a reverse-index cuu1, a
+// different clear) — a direct cause of the stale "blank bands" a full-screen app
+// (vim Ctrl-D/Ctrl-U, `less`) leaves behind, and of washed colours.
 //
-// Scoping: `terminal-overrides` is a SERVER option, and weave must not degrade
-// the user's other tmux clients (iTerm etc. advertise xterm-256color). So ttyd
-// clients advertise TERM=tmux-256color instead — a standard terminfo entry
-// that, on this server, only weave's browser terminals use — and the override
-// is APPENDED (-a) keyed to exactly that TERM, preserving anything the user
-// set. Systems whose terminfo lacks tmux-256color fall back to xterm-256color:
-// terminal works, workaround inactive.
-const TTYD_TERM_OVERRIDE = "tmux-256color:csr@:indn@:rin@";
+// We still want tmux's optimized scroll-region output path disabled for weave's
+// clients (it corrupts under ttyd's pty drain on rapid full-screen scrolls). So
+// instead of mis-setting the outer TERM to scope a server-wide terminal-overrides
+// (the old hack), we compile a private terminfo entry — xterm-256color-weave =
+// xterm-256color with csr/indn/rin cancelled. ONLY weave's ttyd clients advertise
+// it, so the scroll fix is self-scoping: the user's other tmux clients (iTerm,
+// plain xterm-256color) are untouched and no server option is needed. Falls back
+// to plain xterm-256color where `tic` is unavailable (terminal still correct;
+// scroll-region path just not disabled).
+const WEAVE_TERM = "xterm-256color-weave";
+const WEAVE_TERMINFO_SRC =
+  `${WEAVE_TERM}|xterm 256-color for weave (scroll-region disabled),\n` +
+  `\tcsr@, indn@, rin@,\n` +
+  `\tuse=xterm-256color,\n`;
+
+// Compile WEAVE_TERM into the user's ~/.terminfo (no sudo), once. Idempotent: if
+// `infocmp` already resolves it we skip the compile. Returns whether the entry is
+// available so ttydTerm() can fall back to plain xterm-256color when `tic` is
+// missing (e.g. a minimal container).
+let weaveTerminfoChecked = false;
+let weaveTerminfoOk = false;
+function ensureWeaveTerminfo(): boolean {
+  if (weaveTerminfoChecked) return weaveTerminfoOk;
+  weaveTerminfoChecked = true;
+  try {
+    if (Bun.spawnSync(["infocmp", WEAVE_TERM], { stdout: "ignore", stderr: "ignore" }).exitCode === 0) {
+      weaveTerminfoOk = true;
+      return true;
+    }
+    if (!Bun.which("tic")) return false; // can't compile — caller falls back
+    const tmp = join(tmpdir(), `weave-term-${process.pid}.ti`);
+    writeFileSync(tmp, WEAVE_TERMINFO_SRC, "utf8");
+    const rc = Bun.spawnSync(["tic", "-x", "-o", join(homedir(), ".terminfo"), tmp], {
+      stdout: "ignore",
+      stderr: "ignore",
+    }).exitCode;
+    try { unlinkSync(tmp); } catch { /* temp cleanup best-effort */ }
+    weaveTerminfoOk = rc === 0;
+  } catch {
+    /* infocmp/tic threw — fall back to plain xterm-256color */
+  }
+  return weaveTerminfoOk;
+}
+
 let ttydTermCache: string | null = null;
 function ttydTerm(): string {
   if (ttydTermCache) return ttydTermCache;
-  let ok = false;
-  try {
-    ok = Bun.spawnSync(["infocmp", "tmux-256color"], { stdout: "ignore", stderr: "ignore" }).exitCode === 0;
-  } catch {
-    /* infocmp missing — fall back */
-  }
-  ttydTermCache = ok ? "tmux-256color" : "xterm-256color";
+  ttydTermCache = ensureWeaveTerminfo() ? WEAVE_TERM : "xterm-256color";
   return ttydTermCache;
 }
 
@@ -241,20 +267,29 @@ async function applySessionOptions(tmuxName: string): Promise<void> {
     }).exited;
   try {
     await setOpt("mouse", "on");
-    // Scroll-region workaround (rationale at ttydTerm above). Server-scoped by
-    // necessity (terminal-overrides has no session scope) but keyed to the TERM
-    // only weave's ttyd clients advertise, and APPENDED so user-set overrides
-    // survive. Idempotent: skipped once the entry is present. Re-asserted here
-    // (create + reconcile) because the tmux server may be freshly started.
-    if (ttydTerm() === "tmux-256color") {
-      const show = Bun.spawn(["tmux", "show-options", "-sv", "terminal-overrides"], {
+    // Give tmux the correct picture of BOTH terminals:
+    //  • default-terminal — what programs INSIDE tmux (vim) see: tmux-256color,
+    //    for 256 colours + italics. (The OUTER client TERM is xterm-256color-weave,
+    //    set on ttyd via ttydTerm(); the scroll-region disable rides inside that
+    //    terminfo entry, so no server-wide terminal-overrides hack is needed.)
+    //  • terminal-features …:RGB — tell tmux the browser is truecolor (plain
+    //    xterm-256color terminfo lacks the RGB cap), so vim's `termguicolors`
+    //    24-bit output passes through instead of being quantized. A SERVER option
+    //    (no session scope) but keyed to weave's sentinel TERM, so it can't affect
+    //    the user's other tmux clients. Appended + idempotent.
+    //  • window-size latest — size the window to the most-recently-active client
+    //    (the browser), so a stale/hidden client can't pin it to 80×24.
+    await setOpt("default-terminal", "tmux-256color");
+    await setOpt("window-size", "latest");
+    if (ttydTerm() === WEAVE_TERM) {
+      const show = Bun.spawn(["tmux", "show-options", "-sv", "terminal-features"], {
         stdout: "pipe",
         stderr: "ignore",
       });
       const cur = await new Response(show.stdout).text();
       await show.exited;
-      if (!cur.includes("tmux-256color:csr@")) {
-        await Bun.spawn(["tmux", "set-option", "-sa", "terminal-overrides", TTYD_TERM_OVERRIDE], {
+      if (!cur.includes(`${WEAVE_TERM}:RGB`)) {
+        await Bun.spawn(["tmux", "set-option", "-sa", "terminal-features", `,${WEAVE_TERM}:RGB`], {
           stdout: "ignore",
           stderr: "ignore",
         }).exited;
@@ -482,6 +517,30 @@ export async function killSession(id: string): Promise<{ ok: true }> {
   await removeRecord(id);
   await removeLive(id);
   return { ok: true };
+}
+
+// Force tmux to repaint every row to the session's attached client(s). tmux can
+// leave stale/blank bands after a rapid full-screen scroll (it believes the
+// client is current); `refresh-client` re-sends the whole screen and repairs
+// them. Targets each client attached to the session by its tty. Best-effort —
+// the client-side glyph repaint (terminal.js → weave-redraw) covers the rest.
+export async function refreshSession(id: string): Promise<{ ok: boolean }> {
+  const r = await readRecord(id);
+  if (!r || !Bun.which("tmux")) return { ok: false };
+  try {
+    const p = Bun.spawn(["tmux", "list-clients", "-t", r.tmux, "-F", "#{client_tty}"], {
+      stdout: "pipe",
+      stderr: "ignore",
+    });
+    const out = (await new Response(p.stdout).text()).trim();
+    await p.exited;
+    for (const tty of out ? out.split("\n").filter(Boolean) : []) {
+      await Bun.spawn(["tmux", "refresh-client", "-t", tty], { stdout: "ignore", stderr: "ignore" }).exited;
+    }
+    return { ok: true };
+  } catch {
+    return { ok: false };
+  }
 }
 
 // Set (or clear, with an empty string) the user-chosen tab name. A custom name

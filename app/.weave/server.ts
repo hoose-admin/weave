@@ -42,7 +42,7 @@ import {
   type AdrState,
   type ParsedAdr,
 } from "./lib/adrs.ts";
-import { listSessions, createSession, killSession, readLive, readLastCommand, renameSession, reorderSessions } from "./lib/terminals.ts";
+import { listSessions, createSession, killSession, readLive, readLastCommand, renameSession, reorderSessions, refreshSession } from "./lib/terminals.ts";
 import { runSearch, SEARCH_ROOT } from "./lib/search.ts";
 import { activeRuns } from "./lib/chaos.ts";
 import { capturePane, inferState } from "./lib/terminal-status.ts";
@@ -1082,6 +1082,13 @@ const serveOptions = {
       const r = await renameSession(termIdMatch[1], title);
       if (!r) return err("terminal not found", 404);
       return json({ ok: true, customTitle: r.customTitle ?? null });
+    }
+    // Force a full tmux repaint of a terminal to its browser client — the manual
+    // "unstick" for any residual stale/blank band. The client-side glyph repaint
+    // is triggered separately in terminal.js (weave-redraw). No body.
+    const termRedrawMatch = pathname.match(/^\/api\/terminals\/(term-[a-z0-9]+)\/redraw$/);
+    if (termRedrawMatch && req.method === "POST") {
+      return json(await refreshSession(termRedrawMatch[1]));
     }
 
     // The absolute root every search runs against — shown in the search tab UI.

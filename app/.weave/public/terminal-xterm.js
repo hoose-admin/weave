@@ -126,6 +126,26 @@ function safeFit() {
     }
 }
 
+// Force xterm to drop its glyph cache and repaint every row. clearTextureAtlas
+// clears the canvas renderer's cached glyphs (stale/garbled-glyph recovery);
+// refresh re-renders all rows from xterm's buffer. Guarded — clearTextureAtlas
+// is renderer-dependent. Fired on tab-activate, wheel-settle, focus, scheme
+// change, and the explicit "redraw" button, to clear any stale band a full-screen
+// app (vim) left behind.
+function repaint() {
+    try {
+        if (typeof term.clearTextureAtlas === "function") term.clearTextureAtlas();
+        term.refresh(0, term.rows - 1);
+    } catch {
+        /* transient renderer state — ignore */
+    }
+}
+let repaintTimer = null;
+function repaintSoon(delay = 100) {
+    clearTimeout(repaintTimer);
+    repaintTimer = setTimeout(repaint, delay);
+}
+
 // Send raw bytes to the pty as a ttyd INPUT frame.
 function sendInput(data) {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
@@ -434,14 +454,43 @@ if (!port) {
         if (sel) copyText(sel, false);
     });
 
-    new ResizeObserver(() => safeFit()).observe(mount);
+    new ResizeObserver(() => {
+        safeFit();
+        repaintSoon();
+    }).observe(mount);
     window.addEventListener("resize", safeFit);
+
+    // Parent (terminal.js) → child signals. A frame that connected while its tab
+    // was hidden handshaked at xterm's default 80×24 (safeFit no-ops at 0×0); on
+    // tab-activate we re-fit — which fires onResize → sendResize, correcting the
+    // pty/tmux size — then repaint. An explicit "redraw" click just repaints.
+    window.addEventListener("message", (e) => {
+        if (e.origin !== location.origin) return;
+        const t = e.data && e.data.type;
+        if (t === "weave-activate") {
+            safeFit();
+            repaint();
+        } else if (t === "weave-redraw") {
+            repaint();
+        }
+    });
+
+    // A full-screen app (vim) scrolled by the mouse wheel is the classic case
+    // where a stale band can linger; repaint once the wheel settles. Regaining
+    // focus (tab/window switch) can likewise surface a frame that went stale
+    // while hidden.
+    mount.addEventListener("wheel", () => repaintSoon(), { passive: true });
+    window.addEventListener("focus", repaint);
 
     // Live scheme sync: the dashboard's scheme picker writes localStorage from
     // the parent document; the `storage` event fires here (same origin, sibling
-    // browsing context) so we recolor without a reload.
+    // browsing context) so we recolor without a reload. Repaint so the canvas
+    // glyph cache doesn't keep the previous palette's glyphs.
     window.addEventListener("storage", (e) => {
-        if (e.key === SCHEME_KEY) applyScheme();
+        if (e.key === SCHEME_KEY) {
+            applyScheme();
+            repaint();
+        }
     });
 
     connect();

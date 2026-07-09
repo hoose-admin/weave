@@ -26,6 +26,7 @@ const cwdInput = document.getElementById("term-cwd");
 const savedTag = document.getElementById("term-cwd-saved");
 const errEl = document.getElementById("term-bar-error");
 const collapseBtn = document.getElementById("term-collapse");
+const redrawBtn = document.getElementById("term-redraw");
 const schemeSelect = document.getElementById("term-scheme");
 const tipsBtn = document.getElementById("term-tips");
 const tipsModal = document.getElementById("term-tips-modal");
@@ -188,6 +189,18 @@ function activate(id) {
         if (dot) dot.className = "term-status-dot is-idle";
     }
     for (const [fid, f] of frames) f.hidden = fid !== id;
+    // The now-visible terminal re-fits + repaints: a frame that connected while
+    // hidden handshaked at xterm's default 80×24 (its safeFit no-ops at 0×0), so
+    // this is where it corrects its pty size and clears any stale glyphs. Harmless
+    // for search tabs (same-origin, no handler). See terminal-xterm.js "message".
+    const af = frames.get(id);
+    if (af && af.contentWindow) {
+        try {
+            af.contentWindow.postMessage({ type: "weave-activate" }, location.origin);
+        } catch {
+            /* frame not ready — the client re-fits on its own load */
+        }
+    }
     for (const li of listEl.children) {
         li.classList.toggle("active", li.dataset.id === id);
     }
@@ -803,6 +816,31 @@ async function closeSession(id) {
     if (!activeId && frames.size) activate(frames.keys().next().value);
 }
 
+// Force-repaint the active terminal: ask tmux to re-send the full screen (repairs
+// any residual stale/blank band it left) AND tell the client to clear its glyph
+// cache + refresh. Manual "unstick"; the automatic re-fit/repaint on tab switch
+// (activate) covers the common case. Search tabs have no server session — the
+// fetch is skipped for them and the client postMessage is a harmless no-op.
+async function redrawActive() {
+    const id = activeId;
+    if (!id) return;
+    const f = frames.get(id);
+    if (f && f.contentWindow) {
+        try {
+            f.contentWindow.postMessage({ type: "weave-redraw" }, location.origin);
+        } catch {
+            /* frame not ready — ignore */
+        }
+    }
+    if (id.startsWith("term-")) {
+        try {
+            await fetch(`/api/terminals/${id}/redraw`, { method: "POST" });
+        } catch {
+            /* best-effort */
+        }
+    }
+}
+
 // The fork glyph — a small git-branch icon, built with createElementNS to match
 // this file's no-innerHTML DOM style. `stroke: currentColor` so it inherits the
 // button's muted/accent/disabled colors.
@@ -1117,6 +1155,7 @@ wireSchemePicker();
 
 newBtn.addEventListener("click", () => createSession(cwdInput.value.trim()));
 if (searchNewBtn) searchNewBtn.addEventListener("click", newSearchTab);
+if (redrawBtn) redrawBtn.addEventListener("click", redrawActive);
 
 // ── tips modals (vim + claude) ─────────────────────────────────────────────────
 function wireTipsModal(btn, modal) {
