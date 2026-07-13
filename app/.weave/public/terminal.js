@@ -44,8 +44,7 @@ let draggingId = null; // id of the tab currently being drag-reordered, else nul
 const prevStatus = new Map(); // id -> last raw status reported by the server
 const doneIds = new Set(); // background terminals that finished, awaiting a look
 const lastSummary = new Map(); // id -> last non-null summary (shown on the "done" badge)
-const dismissedNotif = new Map(); // id -> notification.id the user has dismissed
-let lastSessions = []; // most recent /api/terminals payload (so switching tabs can re-render the notif)
+let lastSessions = []; // most recent /api/terminals payload (drives the tab hovercards)
 
 // ── search tabs ────────────────────────────────────────────────────────────────
 // Project-search tabs live alongside terminals in the same sidebar list, but are
@@ -134,7 +133,6 @@ function reconcileDone(sessions) {
     for (const id of [...prevStatus.keys()]) if (!live.has(id)) prevStatus.delete(id);
     for (const id of [...doneIds]) if (!live.has(id)) doneIds.delete(id);
     for (const id of [...lastSummary.keys()]) if (!live.has(id)) lastSummary.delete(id);
-    for (const id of [...dismissedNotif.keys()]) if (!live.has(id)) dismissedNotif.delete(id);
 
     for (const s of sessions) {
         const raw = s.status || "idle";
@@ -205,67 +203,10 @@ function activate(id) {
         li.classList.toggle("active", li.dataset.id === id);
     }
     if (emptyEl) emptyEl.hidden = frames.size > 0;
-    renderNotif(lastSessions); // switching tabs swaps which terminal's notif shows
 }
 
-// ── notification overlay ──────────────────────────────────────────────────────
-
-// A non-modal card pinned to the upper-right of the stage, showing what the
-// ACTIVE terminal's Claude is waiting on (a permission or idle prompt, surfaced
-// by the weave_terminal_live.ts hook). The LAYER is pointer-events:none so clicks and
-// keystrokes pass straight through to the ttyd iframe — only the card itself is
-// interactive — so you can answer the prompt by typing in the terminal with the
-// card still up. It stays until dismissed; dismissal is keyed on
-// (terminal, notification.id), so the SAME prompt won't reappear but a NEW one will.
-let notifEl = null;
-function ensureNotifLayer() {
-    if (notifEl) return notifEl;
-    notifEl = document.createElement("div");
-    notifEl.className = "term-notif-layer";
-    notifEl.hidden = true;
-    stageEl.appendChild(notifEl);
-    return notifEl;
-}
-
-function hideNotif(layer) {
-    layer.hidden = true;
-    layer.replaceChildren();
-    layer.dataset.nid = "";
-}
-
-function renderNotif(sessions) {
-    const layer = ensureNotifLayer();
-    const s = sessions.find((x) => x.id === activeId);
-    const n = s && s.notification;
-    if (!n || dismissedNotif.get(activeId) === n.id) {
-        hideNotif(layer);
-        return;
-    }
-    if (layer.dataset.nid === n.id && !layer.hidden) return; // already showing this one
-
-    const card = document.createElement("div");
-    card.className = "term-notif-card";
-
-    const msg = document.createElement("p");
-    msg.className = "term-notif-msg";
-    msg.textContent = n.message || "Claude is waiting for your input";
-
-    const dismiss = document.createElement("button");
-    dismiss.type = "button";
-    dismiss.className = "term-notif-dismiss";
-    dismiss.title = "dismiss";
-    dismiss.setAttribute("aria-label", "dismiss notification");
-    dismiss.textContent = "×";
-    dismiss.addEventListener("click", () => {
-        dismissedNotif.set(activeId, n.id);
-        hideNotif(layer);
-    });
-
-    card.append(msg, dismiss);
-    layer.replaceChildren(card);
-    layer.dataset.nid = n.id;
-    layer.hidden = false;
-}
+// The active terminal's pending prompt (what its Claude is waiting on) surfaces
+// in that tab's hovercard via `term-hovercard-notif` — no intrusive overlay.
 
 // ── drag-to-reorder ───────────────────────────────────────────────────────────
 
@@ -675,7 +616,6 @@ async function load() {
     if (tabs.length && (!activeId || !frames.has(activeId))) {
         activate(tabs[0].id);
     }
-    renderNotif(sessions);
 }
 
 // Poll: patch in place when the tab set is unchanged; re-render only when tabs
@@ -696,7 +636,6 @@ async function refresh() {
     } else {
         patchStatus(sessions);
     }
-    renderNotif(sessions);
 }
 
 // Re-render the list from current client state (after adding/closing a search
