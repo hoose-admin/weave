@@ -499,7 +499,6 @@ main.terminal-page.sidebar-collapsed .term-item-name {
 }
 .term-status-dot.is-attention {
     background: var(--red);
-    animation: weave-pulse 1s ease-in-out infinite;
 }
 .term-status-dot.is-done {
     background: var(--green);
