@@ -1035,6 +1035,26 @@ if (collapseBtn) {
     );
 }
 
+// ── number-key tab switching ──────────────────────────────────────────────────
+// Press 1–9 (no modifier) to jump to the Nth tab in the sidebar, counted in the
+// order shown (search tabs first, then terminals). Only fires when focus is on
+// the dashboard chrome — while you're typing in a terminal the iframe owns the
+// keystroke, so digits reach the shell as usual. Text inputs (rename / cwd /
+// search) and open modals are skipped so digits there still type digits.
+document.addEventListener("keydown", (e) => {
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    const n = Number(e.key);
+    if (!Number.isInteger(n) || n < 1 || n > 9) return;
+    const ae = document.activeElement;
+    const tag = ae ? ae.tagName : "";
+    if (tag === "INPUT" || tag === "TEXTAREA" || (ae && ae.isContentEditable)) return;
+    if (document.querySelector(".modal:not([hidden])")) return;
+    const li = listEl.querySelectorAll(".term-item")[n - 1];
+    if (!li) return;
+    e.preventDefault();
+    activate(li.dataset.id);
+});
+
 // ── utils dropdown ──────────────────────────────────────────────────────────────
 // The centered caret reveals the theme picker, default-dir form and vim-tips
 // button below the toolbar. Closes on outside click, Escape, or collapse.
