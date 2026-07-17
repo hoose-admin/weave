@@ -81,11 +81,11 @@
                             type="button"
                             id="term-tips"
                             class="term-tips-btn"
-                            title="Vim tips"
-                            aria-label="Vim tips"
+                            title="Neovim tips"
+                            aria-label="Neovim tips"
                         >
                             <span class="term-tips-icon" aria-hidden="true">💡</span>
-                            <span class="term-tips-text">Vim tips</span>
+                            <span class="term-tips-text">Neovim tips</span>
                         </button>
                         <button
                             type="button"
@@ -99,13 +99,13 @@
                         </button>
                         <button
                             type="button"
-                            id="term-redraw"
-                            class="term-tips-btn"
-                            title="Redraw terminal (fix a stale or garbled display)"
-                            aria-label="Redraw terminal"
+                            id="term-kill"
+                            class="term-tips-btn term-kill-btn"
+                            title="Kill every weave terminal (each shell + anything running in it) — destructive, confirms first"
+                            aria-label="Kill all terminals"
                         >
-                            <span class="term-tips-icon" aria-hidden="true">⟳</span>
-                            <span class="term-tips-text">Redraw</span>
+                            <span class="term-tips-icon" aria-hidden="true">⏻</span>
+                            <span class="term-tips-text">Kill all</span>
                         </button>
                         <span id="term-cwd-saved" class="term-cwd-saved" hidden>saved ✓</span>
                     </div>
@@ -124,12 +124,12 @@
             </section>
         </main>
 
-        <!-- Vim tips modal: toggled by #term-tips, wired in terminal.js. -->
+        <!-- Neovim tips modal: toggled by #term-tips, wired in terminal.js. -->
         <div class="modal" id="term-tips-modal" hidden>
             <div class="modal-backdrop" data-modal-close></div>
             <div class="modal-card term-tips-card">
                 <header class="modal-head">
-                    <h3>Vim quick reference</h3>
+                    <h3>Neovim quick reference</h3>
                     <button
                         type="button"
                         class="close-btn"
@@ -142,13 +142,27 @@
 
                 <div class="modal-body term-tips-body">
                     <div class="term-tips-hero">
-                        <code class="term-tips-key">:Ex</code>
+                        <code class="term-tips-key">:Neotree</code>
                         <div class="term-tips-hero-text">
-                            Open the built-in file explorer (netrw) — use this
-                            instead of a file browser to navigate and open files
-                            right inside the terminal. <code>:Ex .</code> opens
-                            the current dir; <kbd>Enter</kbd> opens a file,
-                            <kbd>-</kbd> goes up a level.
+                            Open the neo-tree file browser to explore and open
+                            files without leaving the editor. <code>\e</code>
+                            toggles it (<code>\</code> is the leader key). Inside
+                            the tree: <kbd>Enter</kbd> opens a file,
+                            <code>a</code> / <code>d</code> / <code>r</code>
+                            add / delete / rename, <code>H</code> toggles hidden
+                            files, <kbd>?</kbd> shows every key.
+                        </div>
+                    </div>
+
+                    <div class="term-tips-hero">
+                        <code class="term-tips-key">\gd</code>
+                        <div class="term-tips-hero-text">
+                            See changes right in the file like GitHub — green
+                            added / changed lines, red removed lines shown inline.
+                            <code>\gd</code> toggles the inline diff;
+                            <code>\gp</code> expands just the hunk under the
+                            cursor; <code>\gD</code> opens a full split diff
+                            against the last commit.
                         </div>
                     </div>
 
@@ -207,6 +221,30 @@
                             <li><code>:%s/old/new/g</code><span>replace all</span></li>
                         </ul>
                     </section>
+
+                    <div class="term-tips-cols">
+                        <section class="term-tips-section">
+                            <h4 class="term-tips-h">Git in the buffer</h4>
+                            <ul class="term-tips-list term-tips-list--single">
+                                <li><code>\gd</code><span>toggle inline diff (red / green)</span></li>
+                                <li><code>\gp</code><span>preview this hunk inline</span></li>
+                                <li><code>]h</code> / <code>[h</code><span>next / prev change</span></li>
+                                <li><code>\gb</code><span>blame this line</span></li>
+                                <li><code>\gD</code><span>split diff vs last commit</span></li>
+                            </ul>
+                        </section>
+
+                        <section class="term-tips-section">
+                            <h4 class="term-tips-h">Neovim extras</h4>
+                            <ul class="term-tips-list term-tips-list--single">
+                                <li><code>\e</code><span>toggle neo-tree file browser</span></li>
+                                <li><code>\ut</code><span>theme picker</span></li>
+                                <li><code>:colorscheme</code><span>set theme (Tab-completes)</span></li>
+                                <li><code>:Lazy</code><span>manage plugins</span></li>
+                                <li><code>\</code><span>leader key</span></li>
+                            </ul>
+                        </section>
+                    </div>
                 </div>
 
                 <footer class="modal-foot">

@@ -602,7 +602,7 @@ main.terminal-page.sidebar-collapsed .term-item-name {
     gap: 8px;
 }
 
-/* ── vim tips button + modal content ──────────────────────────────────────── */
+/* ── neovim tips button + modal content ──────────────────────────────────────── */
 .term-tips-btn {
     flex: 0 0 auto;
     display: inline-flex;
@@ -625,12 +625,21 @@ main.terminal-page.sidebar-collapsed .term-item-name {
     border-color: var(--accent);
     color: var(--accent);
 }
+.term-kill-btn {
+    color: var(--red);
+    border-color: var(--red);
+}
+.term-kill-btn:hover {
+    border-color: var(--red);
+    color: #fff;
+    background: var(--red);
+}
 .term-tips-icon {
     font-size: 0.9rem;
     line-height: 1;
 }
 
-/* Vim tips modal body: :Ex hero callout + grouped command lists. */
+/* Neovim tips modal body: :Neotree + git-diff hero callouts + grouped command lists. */
 .term-tips-hero {
     display: flex;
     gap: 12px;

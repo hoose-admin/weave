@@ -17,17 +17,18 @@
 // AuthToken is empty: weave starts ttyd without --credential, so it's ignored
 // (and fetching ttyd's /token cross-origin would be blocked by CORS anyway).
 //
-// Session persistence, liveness, and status are unaffected — those live in
-// lib/terminals.ts (ttyd + tmux) and lib/terminal-status.ts (tmux capture-pane),
-// both independent of whichever web client is attached.
+// Session persistence and liveness are unaffected — those live in
+// lib/terminals.ts (ttyd + dtach), independent of whichever web client is
+// attached. dtach passes the app's bytes straight through (no tmux re-emit), so
+// full-screen apps render correctly and there's no server-side resync.
 
 const INPUT = 0x30; // '0'
 const RECONNECT_MS = 1000;
 
 // ── clipboard/selection debug ─────────────────────────────────────────────────
 // Flip CLIP_DEBUG to true to trace the copy path (which branch ran, whether the
-// async writeText resolved or rejected, OSC 52 arrivals). Kept because this
-// stack — xterm ↔ ttyd ↔ tmux(`mouse on`) — makes copy behavior non-obvious.
+// async writeText resolved or rejected, OSC 52 arrivals). Kept because browser
+// clipboard rules (focus, keydown-vs-mouseup) make copy behavior non-obvious.
 // All output is prefixed "[weave-clip]" for easy console filtering.
 const CLIP_DEBUG = false;
 function clog(msg) {
@@ -82,7 +83,7 @@ const term = new Terminal({
 });
 
 // Apply the active scheme to the live terminal AND to the page background. The
-// #term padding (terminal-xterm.html) reveals the page behind the canvas, so
+// #term padding (terminal-xterm.html) reveals the page behind the terminal, so
 // matching documentElement's background to the scheme avoids a mismatched
 // border. The HTML's inline bootstrap sets this for first paint; this keeps it
 // in sync after a live scheme change.
@@ -97,11 +98,9 @@ term.loadAddon(fit);
 
 const mount = document.getElementById("term");
 term.open(mount);
-// Canvas renderer: xterm's default DOM renderer blanks the viewport when a
-// full-screen app (vim) is scrolled via the mouse wheel. The canvas addon
-// replaces it (must load after open()), fixing the repaint without the WebGL
-// addon's per-iframe GPU-context ceiling. See vendor/addon-canvas.js.
-term.loadAddon(new CanvasAddon.CanvasAddon());
+// No renderer addon: xterm uses its built-in DOM renderer, which re-renders each
+// row from the buffer on refresh, so deleting a line never leaves a ghost. (The
+// canvas addon we used before painted stale glyphs — the ghost-on-delete bug.)
 applyScheme();
 safeFit();
 
@@ -126,24 +125,19 @@ function safeFit() {
     }
 }
 
-// Force xterm to drop its glyph cache and repaint every row. clearTextureAtlas
-// clears the canvas renderer's cached glyphs (stale/garbled-glyph recovery);
-// refresh re-renders all rows from xterm's buffer. Guarded — clearTextureAtlas
-// is renderer-dependent. Fired on tab-activate, wheel-settle, focus, scheme
-// change, and the explicit "redraw" button, to clear any stale band a full-screen
-// app (vim) left behind.
+// Re-render every row from xterm's buffer. The DOM renderer repaints on buffer
+// change on its own; this is a cheap belt-and-suspenders nudge on focus / live
+// scheme change / tab-activate. There's no glyph cache to clear — that was a
+// canvas-renderer concern, and we no longer load the canvas addon (the DOM
+// renderer is correct for full-screen apps, so the ghost/blank-band class is
+// gone). dtach passes the app's bytes straight through — no tmux re-emit to
+// desync — so no server-side resync is needed either.
 function repaint() {
     try {
-        if (typeof term.clearTextureAtlas === "function") term.clearTextureAtlas();
         term.refresh(0, term.rows - 1);
     } catch {
         /* transient renderer state — ignore */
     }
-}
-let repaintTimer = null;
-function repaintSoon(delay = 100) {
-    clearTimeout(repaintTimer);
-    repaintTimer = setTimeout(repaint, delay);
 }
 
 // Send raw bytes to the pty as a ttyd INPUT frame.
@@ -210,7 +204,7 @@ function connect() {
     };
     sock.onclose = () => {
         if (ws === sock) ws = null;
-        scheduleReconnect(); // ttyd respawn / page wake — tmux keeps the session
+        scheduleReconnect(); // ttyd respawn / page wake — dtach keeps the session
     };
     sock.onerror = () => {
         try {
@@ -222,9 +216,9 @@ function connect() {
 }
 
 // ── clipboard ─────────────────────────────────────────────────────────────────
-// xterm renders the terminal to a <canvas>, so a mouse selection is xterm's own
-// model painted over that canvas — not real DOM/text selection the OS can see.
-// Two consequences this client has to handle: (1) the browser's native Cmd+C has
+// xterm.js manages selection as its OWN model (a rendered overlay), not native
+// DOM text the OS can see — true regardless of renderer. Two consequences this
+// client has to handle: (1) the browser's native Cmd+C has
 // nothing to copy (no selected DOM text), and (2) the running TUI's frequent
 // repaints (Claude Code's spinner, cursor, status line) clear xterm's selection
 // overlay almost as soon as you make it. We stash every non-empty selection here
@@ -297,9 +291,9 @@ function copyText(text, allowFocusSteal = true) {
 }
 
 // ── "Copied" toast ────────────────────────────────────────────────────────────
-// The plain-shell copy path (tmux copy-mode → OSC 52) auto-copies and clears the
-// highlight the instant you release, so there's no lingering selection to signal
-// success. This flashes a small confirmation, ~0.8s, so a copy is never silent.
+// Copies can be silent (copy-on-select fires on mouseup; a TUI repaint may wipe
+// the highlight right after). This flashes a small confirmation, ~0.8s, so a
+// copy is never silent.
 // Colors invert the active scheme (fg-on-bg → bg-on-fg) so it always reads and
 // matches whatever palette is live. pointer-events:none so it never blocks the
 // terminal; it's positioned within the iframe, i.e. over the terminal pane.
@@ -377,8 +371,8 @@ function installKeyHandler() {
             return false;
         }
 
-        // Cmd+C → copy the selection. xterm has no native copy (canvas, not DOM
-        // text), so we do it: write the live selection, or the last one we saw
+        // Cmd+C → copy the selection. xterm has no native browser copy (it owns
+        // its selection model), so we do it: write the live selection, or the last one we saw
         // before a repaint cleared it, to the clipboard. With nothing selected we
         // fall through — Cmd+C has no terminal meaning, and Ctrl+C/SIGINT is ctrl,
         // not meta, so it stays untouched.
@@ -402,19 +396,17 @@ if (!port) {
 } else {
     installKeyHandler();
     term.onData((d) => sendInput(d));
+    // onResize fires only on a real cols/rows change: tell the pty the new size.
+    // The app (vim/claude) gets SIGWINCH and redraws itself; with dtach passing
+    // bytes straight through there's no re-emit to desync, so no resync needed.
     term.onResize(() => sendResize());
 
-    // ── OSC 52 → system clipboard — the real fix for plain-shell copy ─────────
-    // tmux runs with `mouse on` (lib/terminals.ts), so in a plain shell a normal
-    // drag is forwarded to tmux (xterm reports mouseMode=drag), NOT selected
-    // locally by xterm. tmux does its own copy-mode selection and on release
-    // emits an OSC 52 escape carrying the text (tmux set-clipboard defaults to
-    // `external`, which sends OSC 52 to the outer terminal). xterm.js ignores
-    // OSC 52 by default, so that text used to evaporate — you'd see tmux's
-    // highlight flash and vanish (copy-selection-and-cancel) with nothing on the
-    // system clipboard. Here we decode OSC 52 and push it to the clipboard, so
-    // tmux copy-mode / scrollback selections land there like a native terminal.
-    // The highlight still clears on release — that's tmux confirming the copy.
+    // ── OSC 52 → system clipboard ─────────────────────────────────────────────
+    // A program in the pane can set the system clipboard by emitting an OSC 52
+    // escape (e.g. vim with `set clipboard=unnamed` + an OSC-52 yank plugin, or
+    // any tool that copies via OSC 52). xterm.js ignores OSC 52 by default, so we
+    // decode it and push the text to the clipboard. (Plain mouse selection is
+    // handled locally by xterm below — no tmux copy-mode in the path anymore.)
     term.parser.registerOscHandler(52, (data) => {
         // data = "<targets>;<base64|?>"  e.g. "c;SGVsbG8=" ; "?" is a read query.
         const semi = data.indexOf(";");
@@ -454,38 +446,29 @@ if (!port) {
         if (sel) copyText(sel, false);
     });
 
-    new ResizeObserver(() => {
-        safeFit();
-        repaintSoon();
-    }).observe(mount);
+    new ResizeObserver(() => safeFit()).observe(mount);
     window.addEventListener("resize", safeFit);
 
-    // Parent (terminal.js) → child signals. A frame that connected while its tab
+    // Parent (terminal.js) → child signal. A frame that connected while its tab
     // was hidden handshaked at xterm's default 80×24 (safeFit no-ops at 0×0); on
     // tab-activate we re-fit — which fires onResize → sendResize, correcting the
-    // pty/tmux size — then repaint. An explicit "redraw" click just repaints.
+    // pty size — then repaint.
     window.addEventListener("message", (e) => {
         if (e.origin !== location.origin) return;
-        const t = e.data && e.data.type;
-        if (t === "weave-activate") {
+        if (e.data && e.data.type === "weave-activate") {
             safeFit();
-            repaint();
-        } else if (t === "weave-redraw") {
             repaint();
         }
     });
 
-    // A full-screen app (vim) scrolled by the mouse wheel is the classic case
-    // where a stale band can linger; repaint once the wheel settles. Regaining
-    // focus (tab/window switch) can likewise surface a frame that went stale
-    // while hidden.
-    mount.addEventListener("wheel", () => repaintSoon(), { passive: true });
+    // Regaining focus (tab/window switch) can surface a frame that went stale
+    // while hidden; a cheap refresh clears it.
     window.addEventListener("focus", repaint);
 
     // Live scheme sync: the dashboard's scheme picker writes localStorage from
     // the parent document; the `storage` event fires here (same origin, sibling
-    // browsing context) so we recolor without a reload. Repaint so the canvas
-    // glyph cache doesn't keep the previous palette's glyphs.
+    // browsing context) so we recolor without a reload. Repaint so any glyphs in
+    // the previous palette are re-rendered in the new one.
     window.addEventListener("storage", (e) => {
         if (e.key === SCHEME_KEY) {
             applyScheme();

@@ -42,10 +42,9 @@ import {
   type AdrState,
   type ParsedAdr,
 } from "./lib/adrs.ts";
-import { listSessions, createSession, killSession, readLive, readLastCommand, renameSession, reorderSessions, refreshSession } from "./lib/terminals.ts";
+import { listSessions, createSession, killSession, readLive, readLastCommand, renameSession, reorderSessions, killAllSessions } from "./lib/terminals.ts";
 import { runSearch, SEARCH_ROOT } from "./lib/search.ts";
 import { activeRuns } from "./lib/chaos.ts";
-import { capturePane, inferState } from "./lib/terminal-status.ts";
 import { syncBoardSafe } from "./lib/firestore.ts";
 
 type GraphKind = "tickets" | "dataflow" | "schemas" | "adrs" | "ai";
@@ -273,16 +272,19 @@ async function buildOpenCommand(relPath: unknown, line: number | null): Promise<
   if (!st || !st.isFile()) throw new Error("file not found");
   const shq = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
   const at = line && line > 0 ? `+${Math.floor(line)} ` : "";
-  // Experiment: launch MacVim's GUI (mvim) instead of terminal vim, to sidestep
-  // the browser/xterm scroll-rendering issues. Guarded: mvim is macOS-only and
-  // often not installed, so fall back to terminal vim rather than typing a
-  // command that just fails in the fresh terminal. (Bun.which sees the SERVER's
-  // PATH — possibly narrower than the login shell's — so also probe the usual
-  // Homebrew/locals like rgBin does; a false negative only means plain vim.)
-  const hasMvim =
-    Bun.which("mvim") !== null ||
-    ["/opt/homebrew/bin/mvim", "/usr/local/bin/mvim"].some((p) => existsSync(p));
-  return `${hasMvim ? "mvim" : "vim"} ${at}-- ${shq(resolved)}`;
+  // Editor preference: neovim is weave's DEFAULT (the weave-vim-setup skill ships
+  // its nvim config — neo-tree file browser, gitsigns, nord + the theme switcher).
+  // Fall back to MacVim's GUI (mvim), then plain vim, so click-to-open still works
+  // where nvim isn't installed. nvim/mvim/vim all accept `+N -- <file>`. (Bun.which
+  // sees the SERVER's PATH — possibly narrower than the login shell's — so also
+  // probe the usual Homebrew/local paths; a false negative only means a fallback.)
+  const has = (bin: string, extra: string[]) =>
+    Bun.which(bin) !== null || extra.some((p) => existsSync(p));
+  const editor =
+    has("nvim", ["/opt/homebrew/bin/nvim", "/usr/local/bin/nvim"]) ? "nvim"
+    : has("mvim", ["/opt/homebrew/bin/mvim", "/usr/local/bin/mvim"]) ? "mvim"
+    : "vim";
+  return `${editor} ${at}-- ${shq(resolved)}`;
 }
 
 // Coerce a JSON `line` field to a positive int, else null.
@@ -964,15 +966,16 @@ const serveOptions = {
     }
 
     // Terminal sessions — ttyd-backed local terminals (lib/terminals.ts). Each
-    // session is a ttyd process on its own localhost port; the browser embeds
-    // it via <iframe>. Persistence across reconnects/restarts comes from tmux.
+    // session is a ttyd process on its own localhost port; the browser embeds it
+    // via <iframe>. Persistence across reconnects/restarts comes from the dtach
+    // master that owns the shell's pty.
     if (pathname === "/api/terminals" && req.method === "GET") {
       // Enrich each session with its live status + summary + pending notification.
       // The source of truth is the weave_terminal_live.ts hook (written per session to
       // cache/terminals/live/<id>.json) — it knows what Claude is doing without
       // scraping or any API. Terminals with no hook data (a plain shell, or a
-      // claude started before the hook env was set) fall back to a status inferred
-      // from the tmux pane; that fallback has no summary, so the tab shows its cwd.
+      // claude started before the hook env was set) read idle; no summary, so the
+      // tab shows its cwd.
       const sessions = await listSessions();
       const enriched = await Promise.all(
         sessions.map(async (s) => {
@@ -997,8 +1000,10 @@ const serveOptions = {
               sessionId: live.sessionId ?? null,
             };
           }
-          const status = inferState(await capturePane(s.tmux));
-          return { ...base, status, summary: null, notification: null, sessionId: null };
+          // No hook data (a plain shell, or a `claude` started before the hook
+          // env was set): with tmux gone there's no capture-pane fallback, so
+          // report idle. The hook covers every real Claude session.
+          return { ...base, status: "idle", summary: null, notification: null, sessionId: null };
         }),
       );
       return json(enriched);
@@ -1083,12 +1088,12 @@ const serveOptions = {
       if (!r) return err("terminal not found", 404);
       return json({ ok: true, customTitle: r.customTitle ?? null });
     }
-    // Force a full tmux repaint of a terminal to its browser client — the manual
-    // "unstick" for any residual stale/blank band. The client-side glyph repaint
-    // is triggered separately in terminal.js (weave-redraw). No body.
-    const termRedrawMatch = pathname.match(/^\/api\/terminals\/(term-[a-z0-9]+)\/redraw$/);
-    if (termRedrawMatch && req.method === "POST") {
-      return json(await refreshSession(termRedrawMatch[1]));
+    // The kill switch (repurposed redraw button): reap every weave terminal
+    // (each ttyd + its dtach master) and clear all records for a clean slate.
+    // Destructive and irreversible — the client confirms before calling. Touches
+    // only weave's own sessions. Server-wide, so no terminal id in the path.
+    if (pathname === "/api/terminals/kill-server" && req.method === "POST") {
+      return json(await killAllSessions());
     }
 
     // The absolute root every search runs against — shown in the search tab UI.

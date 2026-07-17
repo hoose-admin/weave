@@ -3,8 +3,8 @@
 // (terminal-xterm.html), which speaks ttyd's protocol to the session's port —
 // owning the client is what lets us remap Shift+Enter / Cmd+Backspace. Session
 // lifecycle is server-side (lib/terminals.ts); live status + summaries come from
-// lib/terminal-status.ts. This module drives the UI and polls /api/terminals
-// every 2.5s to refresh the status dot + summary.
+// the weave_terminal_live.ts hook. This module drives the UI and polls
+// /api/terminals every 2.5s to refresh the status dot + summary.
 //
 // Iframes are mounted once per session and kept in the DOM (hidden when
 // inactive) so switching is instant and never tears down a live connection.
@@ -26,7 +26,7 @@ const cwdInput = document.getElementById("term-cwd");
 const savedTag = document.getElementById("term-cwd-saved");
 const errEl = document.getElementById("term-bar-error");
 const collapseBtn = document.getElementById("term-collapse");
-const redrawBtn = document.getElementById("term-redraw");
+const killBtn = document.getElementById("term-kill");
 const schemeSelect = document.getElementById("term-scheme");
 const tipsBtn = document.getElementById("term-tips");
 const tipsModal = document.getElementById("term-tips-modal");
@@ -755,29 +755,74 @@ async function closeSession(id) {
     if (!activeId && frames.size) activate(frames.keys().next().value);
 }
 
-// Force-repaint the active terminal: ask tmux to re-send the full screen (repairs
-// any residual stale/blank band it left) AND tell the client to clear its glyph
-// cache + refresh. Manual "unstick"; the automatic re-fit/repaint on tab switch
-// (activate) covers the common case. Search tabs have no server session — the
-// fetch is skipped for them and the client postMessage is a harmless no-op.
-async function redrawActive() {
-    const id = activeId;
-    if (!id) return;
-    const f = frames.get(id);
-    if (f && f.contentWindow) {
-        try {
-            f.contentWindow.postMessage({ type: "weave-redraw" }, location.origin);
-        } catch {
-            /* frame not ready — ignore */
-        }
+// Kill switch (the repurposed redraw button). Opens an IN-PAGE confirm modal —
+// reusing the dashboard's own .modal component — rather than window.confirm(),
+// which browsers can silently suppress ("prevent additional dialogs", background
+// tabs) and can't style. On confirm: reap every weave terminal (each ttyd + its
+// dtach master) on the server, then reload to a clean, empty slate. Destructive
+// and irreversible: tears down every weave session (including any live claude
+// session in a tab), but touches only weave's own sessions.
+// (Per-session rendering self-heals on the next dashboard start — no manual
+// redraw/repair action anymore.)
+function killSwitch() {
+    if (document.getElementById("term-kill-modal")) return; // one at a time
+
+    const el = (tag, cls, text) => {
+        const n = document.createElement(tag);
+        if (cls) n.className = cls;
+        if (text != null) n.textContent = text;
+        return n;
+    };
+
+    const overlay = el("div", "modal");
+    overlay.id = "term-kill-modal";
+    const backdrop = el("div", "modal-backdrop");
+    const card = el("div", "modal-card");
+    card.setAttribute("role", "alertdialog");
+    card.setAttribute("aria-modal", "true");
+
+    const head = el("div", "modal-head");
+    head.appendChild(el("h3", null, "Kill all terminals?"));
+
+    const body = el("div", "modal-body");
+    body.appendChild(el("p", null,
+        "Every weave terminal — including any live claude session — is destroyed. " +
+        "This cannot be undone."));
+
+    const foot = el("div", "modal-foot");
+    const cancel = el("button", "btn btn--secondary", "Cancel");
+    const kill = el("button", "btn btn--danger", "Kill all");
+    cancel.type = "button";
+    kill.type = "button";
+    // Push the buttons to the right (an empty .status keeps .modal-foot's layout).
+    foot.appendChild(el("span", "status"));
+    foot.append(cancel, kill);
+
+    card.append(head, body, foot);
+    overlay.append(backdrop, card);
+    document.body.appendChild(overlay);
+    cancel.focus();
+
+    const close = () => {
+        document.removeEventListener("keydown", onKey);
+        overlay.remove();
+    };
+    function onKey(e) {
+        if (e.key === "Escape") { e.preventDefault(); close(); }
     }
-    if (id.startsWith("term-")) {
+    document.addEventListener("keydown", onKey);
+    backdrop.addEventListener("click", close);
+    cancel.addEventListener("click", close);
+    kill.addEventListener("click", async () => {
+        kill.disabled = true;
+        kill.textContent = "Killing…";
         try {
-            await fetch(`/api/terminals/${id}/redraw`, { method: "POST" });
+            await fetch("/api/terminals/kill-server", { method: "POST" });
         } catch {
-            /* best-effort */
+            /* best-effort — reload anyway to resync the (now-empty) tab list */
         }
-    }
+        location.reload();
+    });
 }
 
 // The fork glyph — a small git-branch icon, built with createElementNS to match
@@ -1114,7 +1159,7 @@ wireSchemePicker();
 
 newBtn.addEventListener("click", () => createSession(cwdInput.value.trim()));
 if (searchNewBtn) searchNewBtn.addEventListener("click", newSearchTab);
-if (redrawBtn) redrawBtn.addEventListener("click", redrawActive);
+if (killBtn) killBtn.addEventListener("click", killSwitch);
 
 // ── tips modals (vim + claude) ─────────────────────────────────────────────────
 function wireTipsModal(btn, modal) {

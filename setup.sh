@@ -16,6 +16,7 @@ DO_BROWSERS=1
 ASSUME_BROWSERS=0
 DO_FIRESTORE=1
 ASSUME_FIRESTORE=0
+DO_EDITOR=1
 TARGET=""
 
 usage() {
@@ -43,6 +44,9 @@ options:
                 verifies your Google credentials, backfills the board) — no prompt
   --no-firestore  skip the Firestore mirror entirely, no prompt
                 (default: ASK when a "firestore" block exists in weave.config.json)
+  --no-editor   skip terminal-editor setup (writes nvim + vim config in your home)
+                (default: set up nvim as weave's default editor + vim fallback —
+                 file browser, git signs, themes; idempotent, non-clobbering)
   -h, --help    show this help
 EOF
 }
@@ -57,6 +61,7 @@ while [ $# -gt 0 ]; do
     --no-smoke)  DO_BROWSERS=0 ;;
     --firestore) ASSUME_FIRESTORE=1 ;;
     --no-firestore) DO_FIRESTORE=0 ;;
+    --no-editor) DO_EDITOR=0 ;;
     --port)    PORT="${2:?--port needs a value}"; PORT_SET=1; shift ;;
     -h|--help) usage; exit 0 ;;
     -*)        echo "unknown option: $1" >&2; usage; exit 2 ;;
@@ -100,6 +105,22 @@ bun "$SCRIPT_DIR/scripts/install-payload.ts" "$SCRIPT_DIR" "$TARGET"
 PERMS_FLAG=""
 [ "$DO_GITPERMS" = 1 ] && PERMS_FLAG="--git-perms"
 bun "$SCRIPT_DIR/scripts/merge-settings.ts" "$SCRIPT_DIR/settings.template.json" "$TARGET/.claude/settings.json" $PERMS_FLAG
+
+# ── 2b. terminal editors (nvim = weave's default; vim fallback) ───────────────
+#    weave's terminal opens clicked files in an editor (.weave/server.ts prefers
+#    nvim, then mvim, then vim). Set that editor up: nvim with a file browser
+#    (neo-tree), git signs (gitsigns) and themes (nord default + a switcher); vim
+#    with signify + colors as the fallback. Idempotent and NON-clobbering — a
+#    hand-owned ~/.config/nvim/init.lua or hand-written ~/.vimrc is left alone.
+#    Writes to your HOME (per-user editor config), not the target repo. Plugins
+#    download on first run (network); skip with --no-editor.
+if [ "$DO_EDITOR" = 1 ]; then
+  echo "→ setting up terminal editors (nvim default + vim fallback)"
+  bash "$SCRIPT_DIR/skills/weave-vim-setup/scripts/install.sh" \
+    || echo "  ⚠ editor setup hit an error — run later:  bash \"$SCRIPT_DIR/skills/weave-vim-setup/scripts/install.sh\""
+else
+  echo "→ editor setup skipped (--no-editor). Run later:  bash \"$SCRIPT_DIR/skills/weave-vim-setup/scripts/install.sh\""
+fi
 
 # ── 3. scaffold the .tickets board ───────────────────────────────────────────
 echo "→ scaffolding .tickets board (9 buckets + ADRs)"

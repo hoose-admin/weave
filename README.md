@@ -45,8 +45,8 @@ Claude Code is installed) a backlog of real findings from your code.
 - **[Bun](https://bun.sh)** — runs the dashboard and the CLI. *(required)*
 - **[Claude Code](https://claude.com/claude-code)** — powers the `bug-scan` skill
   that fills the backlog from your code. *(optional, but it's the point)*
-- **[ttyd](https://github.com/tsl0922/ttyd)** + **[tmux](https://github.com/tmux/tmux)**
-  — power the **Terminal** tab (`brew install ttyd tmux`). *(optional)*
+- **[ttyd](https://github.com/tsl0922/ttyd)** + **[dtach](https://github.com/crigler/dtach)**
+  — power the **Terminal** tab (`brew install ttyd dtach`). *(optional)*
 
 ---
 
@@ -156,18 +156,20 @@ ponytail governs *implementation minimalism* (build it with the least code), nev
 
 Open `zsh` terminals in the browser and run `claude` (or anything) in them. Each
 session is a [ttyd](https://github.com/tsl0922/ttyd) process bound to
-`127.0.0.1`, backed by a [tmux](https://github.com/tmux/tmux) session so it
-survives page refreshes and dashboard restarts. The left sidebar lists open
-sessions; the **+** button (top-left) opens one in the default working directory
-set in the bar beside it — which defaults to `~`. Requires `ttyd` + `tmux`
-(`brew install ttyd tmux`) — the tab shows an install hint if they're missing.
+`127.0.0.1`, backed by a [dtach](https://github.com/crigler/dtach) master that
+holds the shell's pty, so it survives page refreshes and dashboard restarts.
+dtach passes the app's bytes straight through (it never re-emits the screen the
+way tmux does), so full-screen TUIs like vim render correctly in the browser.
+The left sidebar lists open sessions; the **+** button (top-left) opens one in
+the default working directory set in the bar beside it — which defaults to `~`.
+Requires `ttyd` + `dtach` (`brew install ttyd dtach`) — the tab shows an install
+hint if they're missing.
 
 Each tab carries a **live status dot** — pulsing amber while something is running
 (e.g. Claude working), red when it's waiting on you (a permission prompt), green
 when a background run just finished and you haven't looked yet, and nothing when
-idle — plus a short **AI summary** of what's happening. weave reads
-each terminal's screen with `tmux capture-pane`; the dot is a purely local
-heuristic, while the summaries call the Anthropic API (Haiku).
+idle — plus a short **AI summary** of what's happening. Both come from the
+local `weave_terminal_live.ts` hook that Claude Code runs inside the session.
 
 > These are fully interactive, writable shells on your machine. ttyd binds to
 > localhost only and there's no extra auth — the same trust model as the rest of
@@ -177,7 +179,7 @@ heuristic, while the summaries call the Anthropic API (Haiku).
 > in a weave terminal, a hook (`weave_terminal_live.ts`) writes its state, a few-word
 > summary of your last prompt, and any pending permission/idle prompt to a local
 > file the dashboard reads — no API key, nothing leaves your machine. Terminals
-> without the hook fall back to a local status dot inferred from the tmux pane.
+> without the hook (e.g. a plain shell) simply show no status dot.
 
 ## Parallel sessions (worktrees)
 
