@@ -177,9 +177,17 @@ function ensureFrame(tab) {
     return f;
 }
 
+// Remember which tab was active so a reload can re-select it (see load()). This
+// also makes scrollback restore reliable: the reselected tab is un-hidden BEFORE
+// its iframe script runs, so it restores at its real size instead of the hidden
+// 80×24 (a later resize would pull the restored history back into the viewport,
+// where the shell's redraw clears it). Key mirrors WEAVE_TERM_SCHEME_KEY's style.
+const ACTIVE_TERM_KEY = "weave-active-term";
+
 function activate(id) {
     if (!frames.has(id)) return;
     activeId = id;
+    try { localStorage.setItem(ACTIVE_TERM_KEY, id); } catch { /* localStorage unavailable */ }
     // Viewing a "done" tab clears its badge immediately (done implies idle).
     if (doneIds.delete(id)) {
         const li = listEl.querySelector(`.term-item[data-id="${id}"]`);
@@ -614,7 +622,13 @@ async function load() {
     const tabs = buildTabs(sessions);
     renderList(tabs);
     if (tabs.length && (!activeId || !frames.has(activeId))) {
-        activate(tabs[0].id);
+        // Re-select the tab that was active before a reload (if it still exists),
+        // so it — the one the user is looking at — restores its scrollback at real
+        // size. Falls back to the first tab (e.g. first ever load, or it was closed).
+        let want = null;
+        try { want = localStorage.getItem(ACTIVE_TERM_KEY); } catch { /* unavailable */ }
+        const pick = want && tabs.some((t) => t.id === want) ? want : tabs[0].id;
+        activate(pick);
     }
 }
 

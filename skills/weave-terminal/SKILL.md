@@ -102,6 +102,64 @@ pty) then repaints. Tell-tale: a session rendering at 80×24 while active.
 the new size, the app gets SIGWINCH and redraws itself, and dtach passes that
 redraw straight through. No resync/`refresh-client` needed (that was tmux-only).
 
+## Scrollback on reload (dtach has none) — client-side restore
+
+dtach keeps **no server-side scrollback** (tmux did, and replayed it on attach).
+So on a hard reload the reattach only sends `winch`: a full-screen TUI
+(claude/vim) redraws itself and looks fine, but a **plain shell comes back
+blank**. This is the expected consequence of dropping tmux, not a render bug — do
+NOT reach for the buffer-probe diagnostic for it.
+
+The fix is **client-side, not a return to tmux** (`terminal-xterm.js`): on save,
+SERIALIZE xterm's parsed buffer to text and stash it in `sessionStorage` keyed by
+port; on load, write it back before `connect()`. Two traps, both proven by test
+(scratch harness drives `/terminal-xterm.html?port=`, produces marked output,
+`page.reload()`, reads the buffer + the reattach WS frames):
+
+1. **Serialize the GRID, not the raw byte stream.** Replaying captured output
+   bytes is defeated by screen-clearing prompts — this repo's zsh prompt emits
+   `ESC[H ESC[J` on every redraw, so a raw replay's own final clear wipes all the
+   restored history (byte replay tested → left only the last prompt). Serialize
+   `term.buffer.normal` (`serializeBuffer`, capped `REPLAY_MAX_LINES`, trailing
+   blanks trimmed). Normal buffer only, so a TUI tab restores its underlying shell
+   history, never a stale alt-screen frame. **Colours preserved** by walking cells
+   and re-emitting SGR (`serializeLine`/`cellSgr` — palette + RGB + the common
+   attribute flags, style change emitted only on a run boundary, reset at line end)
+   — no xterm SerializeAddon (a download) needed; verified a palette-256 colour
+   round-trips through the reload.
+2. **Restore into SCROLLBACK, not the viewport.** On reattach the shell redraws
+   its prompt with `ESC[H ESC[J` (home + erase-below), clearing the whole viewport
+   — captured live as a 104-byte reattach frame. Anything restored *into the
+   viewport* is wiped by it. `ESC[J` can't touch scrollback, so `restoreScrollback`
+   writes the history **followed by `term.rows` newlines**, scrolling it up out of
+   the viewport; the shell then draws its prompt into the cleared viewport, leaving
+   history one scroll-up away with no gap. Then `revealHistoryAfterReattach` (a
+   ~500 ms post-connect `term.scrollLines(-(rows-4))`, gated on `didRestore`) nudges
+   the viewport up so recent history is visible on load with the prompt kept near
+   the bottom — a normal-terminal look, not a lone prompt on a blank screen. Any
+   keypress/scroll snaps back to the live prompt (xterm scrolls to bottom on input).
+3. **Restore must run at the pane's REAL size** — else it's flaky (measured 3/4).
+   The `+term.rows` padding is sized for the viewport at restore time. Every iframe
+   mounts **hidden** (80×24; `safeFit` no-ops at 0×0), and `restoreScrollback` runs
+   at script load. If the pane is later shown and resized (24→45), the resize pulls
+   the scrollback history **back down into the viewport**, where the shell's
+   resize-triggered clear wipes it. Fix lives in **`terminal.js`**: `activate()`
+   persists the tab id to `localStorage` (`ACTIVE_TERM_KEY`) and `load()`
+   re-activates it on reload instead of always `tabs[0]` — so the pane you were
+   viewing is un-hidden *before* its iframe script runs and restores at full size
+   (verified 5/5). Background tabs (not the reloaded-active one) stay best-effort.
+
+`scheduleSave` debounces a save 600 ms after output; `pagehide`/`beforeunload`
+force a final save. `sessionStorage` survives reload, auto-clears on tab close.
+Caveats: background tabs restore at 80×24 and can lose history on their first
+show+resize; a `term.rows`-blank gap can appear for a NON-clearing prompt or a
+running non-TUI process (no reattach clear to absorb the padding). True tmux-style
+*inline* screen restore (recent output visible in the viewport, not just
+scrollback) is blocked by the shell's own winch clear and would need a server-side
+buffer or a `-r winch` change. Repro/verify with the iframe harness (drive
+`/terminal`, POST a session, type, `page.reload()`, read the frame buffer) — a
+top-level `/terminal-xterm.html` harness hides the hidden-iframe resize race.
+
 ## Recovery levers
 
 - **`repaint()`** (`terminal-xterm.js`) = `term.refresh(0, rows-1)`; auto-fires on
@@ -118,10 +176,13 @@ redraw straight through. No resync/`refresh-client` needed (that was tmux-only).
   `ttydArgs` (`dtach -a`), `injectBytes`/`sendKeys`/`sourceCmdHook` (`dtach -p`),
   `dtachHasSession`, `killMaster`, `killAllSessions`, `reconcile`/`respawnTtyd`.
 - `.weave/public/terminal-xterm.js` — Terminal construction (FitAddon, DOM
-  renderer), `safeFit`, `repaint`, the `message`/`weave-activate` listener, the
-  `term.write` byte-capture point, key handler + OSC-52 clipboard.
-- `.weave/public/terminal.js` — `activate()` (`weave-activate`), `ensureFrame()`
-  (iframe `?port=…`), `killSwitch()`.
+  renderer), `safeFit`, `repaint`, the `message`/`weave-activate` listener,
+  `serializeBuffer`/`serializeLine`/`cellSgr`/`persistScrollback`/`scheduleSave`/
+  `restoreScrollback`/`revealHistoryAfterReattach` (sessionStorage grid-serialize
+  reload restore, colours preserved), key handler + OSC-52 clipboard.
+- `.weave/public/terminal.js` — `activate()` (`weave-activate`; persists
+  `ACTIVE_TERM_KEY`), `load()` (re-activates the persisted tab on reload so it
+  restores at full size), `ensureFrame()` (iframe `?port=…`), `killSwitch()`.
 - `.weave/server.ts` — `/api/terminals` routes (create/list/kill/rename/reorder,
   `kill-server`). No `/resync` route anymore.
 - `lib/terminal-status.ts` (the `capture-pane` status fallback) was DELETED with
