@@ -15,7 +15,11 @@ main.terminal-page {
     flex: 1 1 auto;
     min-height: 0;
     display: grid;
-    grid-template-columns: 276px minmax(0, 1fr);
+    /* Sidebar width is user-draggable (see .term-resizer + terminal.js). The
+       variable is set inline on this element from the persisted value; 276px is
+       the default when nothing is saved. */
+    grid-template-columns: var(--term-sidebar-w, 276px) minmax(0, 1fr);
+    position: relative;
 }
 /* Collapsed: the sidebar shrinks to a narrow icon rail — the chevron, a square
    "+" to open a terminal, and one numbered square per session to switch between
@@ -146,6 +150,59 @@ main.terminal-page.sidebar-collapsed {
     background: var(--paper);
 }
 
+/* Draggable divider sitting on the sidebar/stage seam. Absolutely positioned
+   against main.terminal-page (position: relative) so it tracks the live
+   --term-sidebar-w. A hair wide, transparent until hovered/dragged; the wider
+   hit area makes it easy to grab. terminal.js owns the drag + persistence. */
+.term-resizer {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: calc(var(--term-sidebar-w, 276px) - 3px);
+    width: 7px;
+    z-index: 6;
+    cursor: col-resize;
+    background: transparent;
+    border: 0;
+    padding: 0;
+    touch-action: none;
+}
+.term-resizer::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 3px;
+    width: 1px;
+    background: transparent;
+    transition: background 0.12s ease;
+}
+.term-resizer:hover::after,
+main.terminal-page.is-resizing .term-resizer::after {
+    background: var(--accent);
+    box-shadow: 0 0 0 1px var(--accent);
+}
+.term-resizer:focus-visible {
+    outline: none;
+}
+.term-resizer:focus-visible::after {
+    background: var(--accent);
+    box-shadow: 0 0 0 1px var(--focus);
+}
+/* While dragging, kill iframe pointer capture so mouse-moves keep reaching the
+   parent document, and force the resize cursor everywhere. */
+main.terminal-page.is-resizing .term-frame {
+    pointer-events: none;
+}
+main.terminal-page.is-resizing {
+    cursor: col-resize;
+    user-select: none;
+}
+/* Collapsed rail is a fixed width — nothing to drag. */
+main.terminal-page.sidebar-collapsed .term-resizer {
+    display: none;
+}
+
 /* Drawer header — the theme picker fills the row and the collapse chevron is
    pinned to its right. Stays visible in both states, so when the panel is a
    thin rail the chevron is still there to reopen it (the picker hides). */
@@ -157,26 +214,20 @@ main.terminal-page.sidebar-collapsed {
     padding: 6px;
     border-bottom: 1px solid var(--rule);
 }
+/* Collapse toggle lives in the toolbar beside the utils caret — an outlined
+   .term-tool-btn like its neighbours (border, hover accent inherited), with an
+   accent chevron so the two carets read as a matched blue pair. In the collapsed
+   rail it grows to match the "+"/search squares. */
 .term-collapse {
-    flex: 0 0 auto;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 26px;
-    height: 26px;
-    padding: 0;
-    border: 0;
-    border-radius: 6px;
-    background: var(--accent);
-    color: var(--bg);
-    cursor: pointer;
-    line-height: 1;
+    color: var(--accent);
 }
-.term-collapse:hover {
-    filter: brightness(1.08);
+main.terminal-page.sidebar-collapsed .term-collapse {
+    width: 36px;
+    height: 36px;
 }
 .term-collapse-icon {
-    font-size: 1.05rem;
+    font-size: 1.1rem;
+    line-height: 1;
     transition: transform 0.15s ease;
 }
 /* Open: chevron points left (collapse). Collapsed: flip to point right (expand)
@@ -479,6 +530,10 @@ main.terminal-page.sidebar-collapsed .term-item-name {
     main.terminal-page {
         grid-template-columns: 184px minmax(0, 1fr);
     }
+    /* Fixed width on narrow screens — no drag handle. */
+    .term-resizer {
+        display: none;
+    }
 }
 
 /* Per-tab live status dot (working / needs-you / idle) + AI summary line.
@@ -561,17 +616,18 @@ main.terminal-page.sidebar-collapsed .term-item-name {
 }
 /* Caret buttons (utils toggle + collapse) — accent-blue squares, grouped to the
    right. margin-left:auto on the first one pushes the pair over. */
+/* Utilities disclosure — a quiet outlined toggle (matches +Term / search)
+   pushed to the right, paired with the collapse caret. The chevron is tinted
+   accent so it hints "there's more here" without the old solid-blue square
+   out-shouting the primary actions; when the panel is open the whole button
+   lights up (accent border + faint accent wash) and the chevron flips. */
 .term-utils-toggle {
     margin-left: auto;
+    color: var(--accent);
 }
-.term-caret-btn {
-    border: 0;
-    background: var(--accent);
-    color: var(--bg);
-}
-.term-caret-btn:hover {
-    filter: brightness(1.08);
-    color: var(--bg);
+.term-utils-toggle[aria-expanded="true"] {
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 12%, var(--bg));
 }
 .term-utils-caret {
     display: inline-block;
@@ -625,21 +681,31 @@ main.terminal-page.sidebar-collapsed .term-item-name {
     border-color: var(--accent);
     color: var(--accent);
 }
-.term-kill-btn {
-    color: var(--red);
-    border-color: var(--red);
-}
-.term-kill-btn:hover {
-    border-color: var(--red);
-    color: #fff;
-    background: var(--red);
-}
 .term-tips-icon {
     font-size: 0.9rem;
     line-height: 1;
 }
 
-/* Neovim tips modal body: :Neotree + git-diff hero callouts + grouped command lists. */
+/* Terminal tips modal body: hero callouts + grouped command lists. */
+/* The terminal-tips modal is a wide two-purpose reference (editor +
+   multiplexer), so it overrides the default 520px modal width. */
+.term-tips-card {
+    width: min(940px, calc(100% - 32px));
+}
+/* Big, bold divider heading naming each half of the reference. */
+.term-tips-title {
+    margin: 6px 0 2px;
+    font-family: var(--font-display);
+    font-weight: 700;
+    font-size: 1.45rem;
+    line-height: 1.2;
+    color: var(--ink);
+    padding-bottom: 8px;
+    border-bottom: 2px solid var(--accent);
+}
+.term-tips-title:first-child {
+    margin-top: 0;
+}
 .term-tips-hero {
     display: flex;
     gap: 12px;

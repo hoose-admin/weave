@@ -29,7 +29,7 @@
                 <div class="term-toolbar">
                     <button type="button" id="term-new" class="term-btn" title="New terminal">
                         <span class="term-new-icon" aria-hidden="true">+</span>
-                        <span class="term-new-text">Terminal</span>
+                        <span class="term-new-text">Term</span>
                     </button>
                     <button type="button" id="term-search-new" class="term-btn term-search-btn" title="New project search (⌘⇧F)" aria-label="New project search">
                         <span class="term-search-icon" aria-hidden="true">⌕</span>
@@ -37,7 +37,7 @@
                     <button
                         type="button"
                         id="term-utils-toggle"
-                        class="term-tool-btn term-caret-btn term-utils-toggle"
+                        class="term-tool-btn term-utils-toggle"
                         title="Utilities"
                         aria-label="Utilities"
                         aria-haspopup="true"
@@ -49,7 +49,7 @@
                     <button
                         type="button"
                         id="term-collapse"
-                        class="term-tool-btn term-caret-btn term-collapse"
+                        class="term-tool-btn term-collapse"
                         title="Collapse sidebar"
                         aria-label="Collapse sidebar"
                     >
@@ -81,11 +81,11 @@
                             type="button"
                             id="term-tips"
                             class="term-tips-btn"
-                            title="Neovim tips"
-                            aria-label="Neovim tips"
+                            title="Terminal tips"
+                            aria-label="Terminal tips"
                         >
                             <span class="term-tips-icon" aria-hidden="true">💡</span>
-                            <span class="term-tips-text">Neovim tips</span>
+                            <span class="term-tips-text">Terminal tips</span>
                         </button>
                         <button
                             type="button"
@@ -97,22 +97,21 @@
                             <span class="term-tips-icon" aria-hidden="true">✨</span>
                             <span class="term-tips-text">Claude tips</span>
                         </button>
-                        <button
-                            type="button"
-                            id="term-kill"
-                            class="term-tips-btn term-kill-btn"
-                            title="Kill every weave terminal (each shell + anything running in it) — destructive, confirms first"
-                            aria-label="Kill all terminals"
-                        >
-                            <span class="term-tips-icon" aria-hidden="true">⏻</span>
-                            <span class="term-tips-text">Kill all</span>
-                        </button>
                         <span id="term-cwd-saved" class="term-cwd-saved" hidden>saved ✓</span>
                     </div>
                     <p id="term-bar-error" class="term-error" hidden></p>
                 </div>
                 <ul id="term-list" class="term-list"></ul>
             </aside>
+            <div
+                id="term-resizer"
+                class="term-resizer"
+                role="separator"
+                aria-orientation="vertical"
+                aria-label="Resize terminal sidebar"
+                title="Drag to resize · double-click to reset"
+                tabindex="0"
+            ></div>
             <section class="term-stage" id="term-stage">
                 <div class="term-empty" id="term-empty">
                     <p>No terminals open.</p>
@@ -129,7 +128,7 @@
             <div class="modal-backdrop" data-modal-close></div>
             <div class="modal-card term-tips-card">
                 <header class="modal-head">
-                    <h3>Neovim quick reference</h3>
+                    <h3>Terminal quick reference</h3>
                     <button
                         type="button"
                         class="close-btn"
@@ -141,27 +140,34 @@
                 </header>
 
                 <div class="modal-body term-tips-body">
+                    <!-- ── Neovim (weave's default editor; click-to-open prefers
+                         nvim). Bindings mirror the managed init.lua — leader is
+                         Space (vim.g.mapleader = ' '). ── -->
+                    <h4 class="term-tips-title">File editing and navigation using Neovim</h4>
+
                     <div class="term-tips-hero">
-                        <code class="term-tips-key">:Neotree</code>
+                        <code class="term-tips-key">Space e</code>
                         <div class="term-tips-hero-text">
-                            Open the neo-tree file browser to explore and open
-                            files without leaving the editor. <code>\e</code>
-                            toggles it (<code>\</code> is the leader key). Inside
-                            the tree: <kbd>Enter</kbd> opens a file,
-                            <code>a</code> / <code>d</code> / <code>r</code>
+                            <strong>Space</strong> is the leader key — your
+                            shortcut prefix: tap <kbd>Space</kbd>, then the next
+                            key (pause after Space for a menu of every command).
+                            <code>Space e</code> toggles the neo-tree file
+                            browser; <code>\</code> reveals the current file in
+                            the tree. Inside the tree: <kbd>Enter</kbd> opens a
+                            file, <code>a</code> / <code>d</code> / <code>r</code>
                             add / delete / rename, <code>H</code> toggles hidden
                             files, <kbd>?</kbd> shows every key.
                         </div>
                     </div>
 
                     <div class="term-tips-hero">
-                        <code class="term-tips-key">\gd</code>
+                        <code class="term-tips-key">Space g d</code>
                         <div class="term-tips-hero-text">
                             See changes right in the file like GitHub — green
                             added / changed lines, red removed lines shown inline.
-                            <code>\gd</code> toggles the inline diff;
-                            <code>\gp</code> expands just the hunk under the
-                            cursor; <code>\gD</code> opens a full split diff
+                            <code>Space g d</code> toggles the inline diff;
+                            <code>Space g p</code> expands just the hunk under the
+                            cursor; <code>Space g D</code> opens a full split diff
                             against the last commit.
                         </div>
                     </div>
@@ -214,34 +220,74 @@
                         </section>
                     </div>
 
-                    <section class="term-tips-section">
-                        <h4 class="term-tips-h">Search &amp; replace</h4>
-                        <ul class="term-tips-list">
-                            <li><code>/text</code> then <kbd>n</kbd><span>search, next match</span></li>
-                            <li><code>:%s/old/new/g</code><span>replace all</span></li>
-                        </ul>
-                    </section>
-
                     <div class="term-tips-cols">
                         <section class="term-tips-section">
-                            <h4 class="term-tips-h">Git in the buffer</h4>
+                            <h4 class="term-tips-h">Search &amp; find</h4>
                             <ul class="term-tips-list term-tips-list--single">
-                                <li><code>\gd</code><span>toggle inline diff (red / green)</span></li>
-                                <li><code>\gp</code><span>preview this hunk inline</span></li>
-                                <li><code>]h</code> / <code>[h</code><span>next / prev change</span></li>
-                                <li><code>\gb</code><span>blame this line</span></li>
-                                <li><code>\gD</code><span>split diff vs last commit</span></li>
+                                <li><code>/text</code> then <kbd>n</kbd><span>search, next match</span></li>
+                                <li><code>:%s/old/new/g</code><span>replace all</span></li>
+                                <li><code>Space s f</code><span>find files (fuzzy)</span></li>
+                                <li><code>Space s g</code><span>live-grep project text</span></li>
+                                <li><code>Space Space</code><span>switch open files</span></li>
                             </ul>
                         </section>
 
                         <section class="term-tips-section">
-                            <h4 class="term-tips-h">Neovim extras</h4>
+                            <h4 class="term-tips-h">Git in the buffer</h4>
                             <ul class="term-tips-list term-tips-list--single">
-                                <li><code>\e</code><span>toggle neo-tree file browser</span></li>
-                                <li><code>\ut</code><span>theme picker</span></li>
-                                <li><code>:colorscheme</code><span>set theme (Tab-completes)</span></li>
-                                <li><code>:Lazy</code><span>manage plugins</span></li>
-                                <li><code>\</code><span>leader key</span></li>
+                                <li><code>Space g d</code><span>toggle inline diff (red / green)</span></li>
+                                <li><code>Space g p</code><span>preview this hunk inline</span></li>
+                                <li><code>]h</code> / <code>[h</code><span>next / prev change</span></li>
+                                <li><code>Space g b</code><span>blame this line</span></li>
+                                <li><code>Space g D</code><span>split diff vs last commit</span></li>
+                            </ul>
+                        </section>
+                    </div>
+
+                    <!-- ── Multiplexer (zellij): splits, tabs, scrollback for
+                         every terminal tab. Prefix + bindings mirror
+                         .weave/lib/zellij/config.kdl. ── -->
+                    <h4 class="term-tips-title">Controlling terminal windows</h4>
+
+                    <div class="term-tips-hero">
+                        <code class="term-tips-key">Ctrl-a</code>
+                        <div class="term-tips-hero-text">
+                            The <strong>prefix</strong> for the terminal
+                            multiplexer (zellij) that drives splits, tabs and
+                            scrollback. Press <code>Ctrl-a</code>, release, then
+                            one command below — you land right back in the shell.
+                            <code>Ctrl-a</code> twice sends a literal Ctrl-a;
+                            <kbd>Esc</kbd> cancels the prefix; <code>Ctrl-g</code>
+                            drops to zellij's native mode.
+                        </div>
+                    </div>
+
+                    <div class="term-tips-cols">
+                        <section class="term-tips-section">
+                            <h4 class="term-tips-h">Panes — after Ctrl-a</h4>
+                            <ul class="term-tips-list term-tips-list--single">
+                                <li><code>|</code> / <code>-</code><span>split right / down (also <code>%</code> <code>"</code>)</span></li>
+                                <li><code>h</code> <code>j</code> <code>k</code> <code>l</code><span>focus pane ← ↓ ↑ → (or arrows)</span></li>
+                                <li><code>o</code><span>cycle to next pane</span></li>
+                                <li><code>{</code> / <code>}</code><span>move pane left / right</span></li>
+                                <li><code>z</code><span>zoom pane to fullscreen</span></li>
+                                <li><code>x</code><span>close pane</span></li>
+                                <li><code>!</code><span>break pane into its own tab</span></li>
+                            </ul>
+                        </section>
+
+                        <section class="term-tips-section">
+                            <h4 class="term-tips-h">Tabs, resize &amp; session — after Ctrl-a</h4>
+                            <ul class="term-tips-list term-tips-list--single">
+                                <li><code>c</code><span>new tab (window)</span></li>
+                                <li><code>n</code> / <code>p</code><span>next / previous tab</span></li>
+                                <li><code>1</code>–<code>9</code><span>jump to tab N</span></li>
+                                <li><code>,</code><span>rename tab (Enter confirms)</span></li>
+                                <li><code>&amp;</code><span>close tab</span></li>
+                                <li><code>H</code> <code>J</code> <code>K</code> <code>L</code><span>resize pane (repeats; Esc exits)</span></li>
+                                <li><code>Space</code><span>cycle pane layout</span></li>
+                                <li><code>[</code><span>scroll / copy mode (<code>q</code> exits)</span></li>
+                                <li><code>d</code><span>detach session</span></li>
                             </ul>
                         </section>
                     </div>

@@ -967,8 +967,8 @@ const serveOptions = {
 
     // Terminal sessions — ttyd-backed local terminals (lib/terminals.ts). Each
     // session is a ttyd process on its own localhost port; the browser embeds it
-    // via <iframe>. Persistence across reconnects/restarts comes from the dtach
-    // master that owns the shell's pty.
+    // via <iframe>. Persistence across reconnects/restarts comes from the
+    // detached zellij session that owns the shell's pty.
     if (pathname === "/api/terminals" && req.method === "GET") {
       // Enrich each session with its live status + summary + pending notification.
       // The source of truth is the weave_terminal_live.ts hook (written per session to
@@ -1089,7 +1089,7 @@ const serveOptions = {
       return json({ ok: true, customTitle: r.customTitle ?? null });
     }
     // The kill switch (repurposed redraw button): reap every weave terminal
-    // (each ttyd + its dtach master) and clear all records for a clean slate.
+    // (each ttyd + its zellij session) and clear all records for a clean slate.
     // Destructive and irreversible — the client confirms before calling. Touches
     // only weave's own sessions. Server-wide, so no terminal id in the path.
     if (pathname === "/api/terminals/kill-server" && req.method === "POST") {

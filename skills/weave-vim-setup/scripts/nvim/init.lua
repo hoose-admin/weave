@@ -3,7 +3,8 @@
 --
 -- This is kickstart.nvim (https://github.com/nvim-lua/kickstart.nvim) as-is, plus two
 -- weave additions: neo-tree (file browser, <leader>e) and gitsigns hunk keymaps (]h / [h).
--- Colorscheme is catppuccin (an nvim 0.12 built-in); tokyonight is also installed.
+-- Colorscheme is Aizen Dark (the weave terminal palette, via mini.base16);
+-- catppuccin (an nvim 0.12 built-in) and tokyonight are also selectable.
 -- Plugins install on first launch via the built-in vim.pack manager (needs nvim 0.12+).
 
 -- ============================================================================
@@ -447,9 +448,10 @@ do
   -- Load the colorscheme here.
   -- Like many other themes, this one has different styles, and you could load
   -- any other, such as 'tokyonight-storm', 'tokyonight-moon', or 'tokyonight-day'.
-  -- weave: default theme is catppuccin (a built-in nvim 0.12 colorscheme — no plugin
-  -- needed). tokyonight above stays installed and selectable via :Telescope colorscheme.
-  vim.cmd.colorscheme 'catppuccin'
+  -- weave: the default theme is Aizen Dark, applied in the mini.nvim section
+  -- below (it is generated from the 16-color palette via mini.base16, so
+  -- mini.nvim must be loaded first). catppuccin (an nvim 0.12 built-in) and
+  -- tokyonight above stay selectable via :Telescope colorscheme.
 
   -- Highlight todo, notes, etc in comments
   vim.pack.add { gh 'folke/todo-comments.nvim' }
@@ -458,6 +460,39 @@ do
   -- [[ mini.nvim ]]
   --  A collection of various small independent plugins/modules
   vim.pack.add { gh 'nvim-mini/mini.nvim' }
+
+  -- weave: default theme "Aizen Dark" — the same palette as the weave browser
+  -- terminal (.weave/public/terminal-schemes.js; canonical source:
+  -- mbadolato/iTerm2-Color-Schemes "Aizen Dark"), built into a full colorscheme
+  -- (treesitter/LSP/plugin groups + :terminal colors) by mini.base16. Falls back
+  -- to catppuccin if mini.base16 is unavailable so the editor is never unthemed.
+  local aizen_ok = pcall(function()
+    require('mini.base16').setup {
+      palette = {
+        base00 = '#1a1a1a', -- background
+        base01 = '#242424', -- lighter bg (cursorline, popups)
+        base02 = '#333333', -- selection
+        base03 = '#767676', -- comments (readable on base00)
+        base04 = '#9aa0bc', -- dim fg (line numbers)
+        base05 = '#d0d6f0', -- foreground
+        base06 = '#e4e8fa', -- light fg
+        base07 = '#ffffff', -- lightest
+        base08 = '#f08898', -- red
+        base09 = '#f8b080', -- orange (the scheme's cursor colour)
+        base0A = '#f5dea4', -- yellow
+        base0B = '#a4e09c', -- green
+        base0C = '#90dcd0', -- cyan
+        base0D = '#84b4f8', -- blue
+        base0E = '#c8a2f4', -- purple
+        base0F = '#c08868', -- warm brown
+      },
+    }
+  end)
+  if aizen_ok then
+    vim.g.colors_name = 'aizen-dark'
+  else
+    vim.cmd.colorscheme 'catppuccin'
+  end
 
   -- If a nerd font is available, load the icons module for pretty icons in various plugins.
   if vim.g.have_nerd_font then

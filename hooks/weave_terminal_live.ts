@@ -4,7 +4,7 @@
  *
  * Wired to UserPromptSubmit + Stop + Notification in .claude/settings.json. The
  * weave dashboard can't see inside a terminal (ttyd streams I/O straight to the
- * browser), so instead of scraping the tmux pane or calling an API, it reads a
+ * browser), so instead of scraping the terminal or calling an API, it reads a
  * tiny JSON file this hook keeps up to date — what the session is working on,
  * its coarse state, and any pending user decision.
  *
@@ -16,7 +16,7 @@
  *                        with a fresh id the UI dedupes dismissal on.
  *
  * Inert unless WEAVE_TERM_ID + WEAVE_LIVE_DIR are set — weave injects those into
- * the tmux session it owns, so this is a silent no-op in any other Claude
+ * the zellij session it owns, so this is a silent no-op in any other Claude
  * session. Purely observational (never returns a `decision`), so it can't
  * interfere with other hooks on the same event. Fails OPEN on any error.
  *
@@ -35,10 +35,12 @@ type Live = {
   updatedAt?: string;
 };
 
-// A few-word echo of the user's own ask — the simplest honest "what is this
-// session working on" signal, with no LLM/API in the loop.
+// A short echo of the user's own ask — the simplest "what is this session
+// working on" signal, with no LLM/API in the loop. Kept generous (the sidebar
+// sub-line clips to one line via CSS; the tab hovercard shows the full string),
+// so raising this cap only grows what the hovercard reveals, not the tab row.
 function toSummary(prompt: string): string {
-  return prompt.replace(/\s+/g, " ").trim().split(" ").slice(0, 8).join(" ").slice(0, 80);
+  return prompt.replace(/\s+/g, " ").trim().split(" ").slice(0, 40).join(" ").slice(0, 240);
 }
 
 function load(path: string): Live | null {

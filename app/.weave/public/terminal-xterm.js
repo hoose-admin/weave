@@ -18,9 +18,10 @@
 // (and fetching ttyd's /token cross-origin would be blocked by CORS anyway).
 //
 // Session persistence and liveness are unaffected — those live in
-// lib/terminals.ts (ttyd + dtach), independent of whichever web client is
-// attached. dtach passes the app's bytes straight through (no tmux re-emit), so
-// full-screen apps render correctly and there's no server-side resync.
+// lib/terminals.ts (ttyd + zellij in weave's own private socket dir),
+// independent of whichever web client is attached. zellij replays the visible
+// screen on every attach and keeps scrollback server-side (wheel-scroll), so
+// this client carries no scrollback-restore machinery.
 
 const INPUT = 0x30; // '0'
 const RECONNECT_MS = 1000;
@@ -129,9 +130,7 @@ function safeFit() {
 // change on its own; this is a cheap belt-and-suspenders nudge on focus / live
 // scheme change / tab-activate. There's no glyph cache to clear — that was a
 // canvas-renderer concern, and we no longer load the canvas addon (the DOM
-// renderer is correct for full-screen apps, so the ghost/blank-band class is
-// gone). dtach passes the app's bytes straight through — no tmux re-emit to
-// desync — so no server-side resync is needed either.
+// renderer is correct for full-screen apps).
 function repaint() {
     try {
         term.refresh(0, term.rows - 1);
@@ -198,13 +197,13 @@ function connect() {
         if (!u.length) return;
         const cmd = String.fromCharCode(u[0]);
         const body = u.subarray(1);
-        if (cmd === "0") { term.write(body); scheduleSave(); } // OUTPUT
+        if (cmd === "0") term.write(body); // OUTPUT
         else if (cmd === "1") document.title = dec.decode(body); // SET_WINDOW_TITLE
         else if (cmd === "2") applyPrefs(body); // SET_PREFERENCES
     };
     sock.onclose = () => {
         if (ws === sock) ws = null;
-        scheduleReconnect(); // ttyd respawn / page wake — dtach keeps the session
+        scheduleReconnect(); // ttyd respawn / page wake — zellij keeps the session
     };
     sock.onerror = () => {
         try {
@@ -215,150 +214,12 @@ function connect() {
     };
 }
 
-// ── scrollback persistence (repopulate on hard reload) ──────────────────────────
-// dtach keeps NO server-side scrollback, so on a hard reload a plain shell comes
-// back blank (a full-screen TUI redraws itself on the winch reattach; a shell does
-// not). We restore it CLIENT-SIDE: on save we SERIALIZE xterm's parsed buffer grid
-// to text and stash it in sessionStorage (survives reload, auto-clears on tab
-// close); on load we write it back before reconnecting.
-//
-// We serialize the GRID (the parsed result), NOT the raw output byte stream:
-// replaying raw bytes is defeated by screen-clearing prompts — this repo's zsh
-// prompt emits ESC[H ESC[J on each redraw, so a raw replay's final clear wipes all
-// the restored history (verified). We serialize the NORMAL buffer only, never a
-// TUI's alternate screen, so a claude/vim tab restores its underlying shell
-// scrollback rather than a stale TUI frame (the TUI redraws itself on reattach).
-// Colours are preserved by walking cells and re-emitting SGR (serializeLine) — not
-// a return to tmux's re-emit; this is a one-shot snapshot of our own parsed grid.
-const REPLAY_KEY = `weave-term-replay:${port}`;
-const REPLAY_MAX_LINES = 3000; // cap history retained (render cost + sessionStorage quota)
-let saveTimer = null;
+// ── no client-side scrollback persistence on this branch ────────────────────
+// zellij keeps scrollback server-side (wheel-scroll over the full history) and
+// re-emits the visible screen on every attach, so a hard reload comes back with
+// the screen intact on its own — the dtach branch's sessionStorage
+// serialize/restore machinery is unnecessary here.
 
-// The SGR params that reproduce one cell's style from a reset. Returns "" for a
-// fully-default cell (so it collapses to a bare reset). Colours cover palette (256)
-// and truecolor (RGB); attributes cover the common SGR flags.
-function cellSgr(cell) {
-    const p = [];
-    if (cell.isBold()) p.push(1);
-    if (cell.isDim()) p.push(2);
-    if (cell.isItalic()) p.push(3);
-    if (cell.isUnderline()) p.push(4);
-    if (cell.isBlink()) p.push(5);
-    if (cell.isInverse()) p.push(7);
-    if (cell.isInvisible()) p.push(8);
-    if (cell.isStrikethrough()) p.push(9);
-    if (cell.isFgRGB()) { const c = cell.getFgColor(); p.push(38, 2, (c >> 16) & 255, (c >> 8) & 255, c & 255); }
-    else if (cell.isFgPalette()) p.push(38, 5, cell.getFgColor());
-    if (cell.isBgRGB()) { const c = cell.getBgColor(); p.push(48, 2, (c >> 16) & 255, (c >> 8) & 255, c & 255); }
-    else if (cell.isBgPalette()) p.push(48, 5, cell.getBgColor());
-    return p.join(";");
-}
-
-// Serialize one buffer line to text with SGR escapes, emitting a style change only
-// when it differs from the previous cell's, trimming trailing blank cells (a blank
-// cell = space + default bg + not inverse), and resetting at line end so no colour
-// bleeds into the next line. Returns "" for a fully blank line.
-function serializeLine(line, cols) {
-    const cell = line.getCell(0);
-    let last = -1;
-    for (let x = 0; x < cols; x++) {
-        line.getCell(x, cell);
-        const ch = cell.getChars();
-        if (!((ch === "" || ch === " ") && cell.isBgDefault() && !cell.isInverse())) last = x;
-    }
-    if (last < 0) return "";
-    let out = "";
-    let sig = null;
-    for (let x = 0; x <= last; x++) {
-        line.getCell(x, cell);
-        if (cell.getWidth() === 0) continue; // trailing half of a wide glyph
-        const s = cellSgr(cell);
-        if (s !== sig) { out += "\x1b[0" + (s ? ";" + s : "") + "m"; sig = s; }
-        out += cell.getChars() || " ";
-    }
-    return out + "\x1b[0m";
-}
-
-// Serialize the normal buffer (scrollback + viewport), colours included, capped to
-// the last REPLAY_MAX_LINES with trailing blank lines trimmed.
-function serializeBuffer() {
-    const b = term.buffer.normal;
-    const cols = term.cols;
-    const start = Math.max(0, b.length - REPLAY_MAX_LINES);
-    const lines = [];
-    for (let i = start; i < b.length; i++) {
-        const line = b.getLine(i);
-        lines.push(line ? serializeLine(line, cols) : "");
-    }
-    while (lines.length && lines[lines.length - 1] === "") lines.pop();
-    return lines.join("\n");
-}
-
-function persistScrollback() {
-    if (saveTimer) {
-        clearTimeout(saveTimer);
-        saveTimer = null;
-    }
-    try {
-        sessionStorage.setItem(REPLAY_KEY, serializeBuffer());
-    } catch {
-        /* quota/unavailable — the live terminal is unaffected */
-    }
-}
-
-// Debounced save, scheduled as new output arrives (xterm has parsed the writes into
-// the buffer by the time this fires). pagehide/beforeunload force a final save.
-function scheduleSave() {
-    if (!saveTimer) saveTimer = setTimeout(persistScrollback, 600);
-}
-
-// Replay the saved history into the fresh terminal before reconnecting, so a hard
-// reload comes back with the shell's scrollback instead of blank.
-//
-// The history must land in SCROLLBACK, not the viewport: on reattach the shell
-// redraws its prompt with ESC[H ESC[J (home + erase-below), which clears the whole
-// viewport and would wipe anything left on screen — but ESC[J can't touch scrollback.
-// So after the history we emit a viewport's worth of newlines, scrolling the history
-// up out of the viewport; the shell then draws its prompt into the (blank) viewport
-// it clears, leaving the history one scroll-up away with no gap. Full-screen TUIs
-// are unaffected — they redraw their own frame over the cleared viewport.
-//
-// This is padded by term.rows, so it must run at the pane's REAL size: if it runs
-// while the iframe is hidden (80×24) and the tab is then shown+resized, the resize
-// pulls the history back down into the viewport where the reattach clear wipes it.
-// terminal.js re-activates the previously-active tab on reload (ACTIVE_TERM_KEY) so
-// the viewed pane is un-hidden before this runs; background tabs are best-effort.
-function restoreScrollback() {
-    let text = null;
-    try {
-        text = sessionStorage.getItem(REPLAY_KEY);
-    } catch {
-        /* sessionStorage unavailable — nothing to restore */
-    }
-    if (!text) return false;
-    term.write(text.replace(/\n/g, "\r\n") + "\r\n".repeat(term.rows));
-    return true;
-}
-
-// After a restore, the shell's reattach clear draws its prompt at the TOP of the
-// viewport with the restored history in scrollback above it — so the history is
-// hidden until you scroll up. Once the reattach has settled, nudge the viewport up
-// so recent history is visible with the prompt kept near the bottom (a normal-
-// terminal look, instead of a lone prompt on a blank screen). Any keypress or
-// scroll snaps back to the live prompt (xterm scrolls to bottom on user input).
-function revealHistoryAfterReattach() {
-    setTimeout(() => {
-        try {
-            const b = term.buffer.active;
-            // Leave a few rows for the (multi-line) prompt so the input line stays
-            // visible; scroll up no further than the restored scrollback we have.
-            const k = Math.min(b.baseY, Math.max(0, term.rows - 4));
-            if (k > 0) term.scrollLines(-k);
-        } catch {
-            /* transient renderer/buffer state — ignore */
-        }
-    }, 500);
-}
 
 // ── clipboard ─────────────────────────────────────────────────────────────────
 // xterm.js manages selection as its OWN model (a rendered overlay), not native
@@ -542,16 +403,17 @@ if (!port) {
     installKeyHandler();
     term.onData((d) => sendInput(d));
     // onResize fires only on a real cols/rows change: tell the pty the new size.
-    // The app (vim/claude) gets SIGWINCH and redraws itself; with dtach passing
-    // bytes straight through there's no re-emit to desync, so no resync needed.
+    // ttyd resizes its pty, the zellij client relays it to the session, and the
+    // app redraws itself on SIGWINCH.
     term.onResize(() => sendResize());
 
     // ── OSC 52 → system clipboard ─────────────────────────────────────────────
     // A program in the pane can set the system clipboard by emitting an OSC 52
     // escape (e.g. vim with `set clipboard=unnamed` + an OSC-52 yank plugin, or
     // any tool that copies via OSC 52). xterm.js ignores OSC 52 by default, so we
-    // decode it and push the text to the clipboard. (Plain mouse selection is
-    // handled locally by xterm below — no tmux copy-mode in the path anymore.)
+    // decode it and push the text to the clipboard. With mouse_mode on, a plain
+    // drag is a zellij selection — zellij copies it via OSC 52 too, so mouse
+    // copies still reach the system clipboard.
     term.parser.registerOscHandler(52, (data) => {
         // data = "<targets>;<base64|?>"  e.g. "c;SGVsbG8=" ; "?" is a read query.
         const semi = data.indexOf(";");
@@ -621,14 +483,6 @@ if (!port) {
         }
     });
 
-    // Repopulate the pane from our saved byte stream BEFORE reconnecting, then
-    // keep persisting as new output arrives and force a synchronous save on unload,
-    // so a hard reload comes back with the shell's history instead of blank.
-    const didRestore = restoreScrollback();
-    window.addEventListener("pagehide", persistScrollback);
-    window.addEventListener("beforeunload", persistScrollback);
-
     connect();
     term.focus();
-    if (didRestore) revealHistoryAfterReattach();
 }

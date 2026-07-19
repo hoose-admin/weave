@@ -175,8 +175,8 @@ setup_vim() {
       printf 'syntax on\n'
       printf 'colorscheme evening\n'
       printf '%s\n' "\" vim-signify: git diff signs in the gutter. Auto-loaded from pack start/."
-      printf '%s\n' "\" realtime OFF: as-you-type sign churn re-corrupts the weave/ttyd/tmux"
-      printf '%s\n' "\" terminal (same reason gitgutter was opt-in). Signs refresh on write/BufEnter."
+      printf '%s\n' "\" realtime OFF: signs refresh on write/BufEnter only — no as-you-type"
+      printf '%s\n' "\" churn in the weave browser terminal (kept from the tmux-era fix)."
       printf 'set signcolumn=yes\n'
       printf 'let g:signify_realtime = 0\n'
       printf "let g:signify_vcs_list = ['git']\n"

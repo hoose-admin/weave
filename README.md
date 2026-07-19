@@ -45,8 +45,8 @@ Claude Code is installed) a backlog of real findings from your code.
 - **[Bun](https://bun.sh)** — runs the dashboard and the CLI. *(required)*
 - **[Claude Code](https://claude.com/claude-code)** — powers the `bug-scan` skill
   that fills the backlog from your code. *(optional, but it's the point)*
-- **[ttyd](https://github.com/tsl0922/ttyd)** + **[dtach](https://github.com/crigler/dtach)**
-  — power the **Terminal** tab (`brew install ttyd dtach`). *(optional)*
+- **[ttyd](https://github.com/tsl0922/ttyd)** + **[zellij](https://zellij.dev)**
+  — power the **Terminal** tab (`brew install ttyd zellij`). *(optional)*
 
 ---
 
@@ -156,14 +156,15 @@ ponytail governs *implementation minimalism* (build it with the least code), nev
 
 Open `zsh` terminals in the browser and run `claude` (or anything) in them. Each
 session is a [ttyd](https://github.com/tsl0922/ttyd) process bound to
-`127.0.0.1`, backed by a [dtach](https://github.com/crigler/dtach) master that
-holds the shell's pty, so it survives page refreshes and dashboard restarts.
-dtach passes the app's bytes straight through (it never re-emits the screen the
-way tmux does), so full-screen TUIs like vim render correctly in the browser.
+`127.0.0.1`, backed by a detached [zellij](https://zellij.dev) session that
+holds the shell's pty, so it survives page refreshes and dashboard restarts —
+and reattach replays the screen, with scrollback kept server-side (wheel to
+scroll). Weave runs zellij against its own private socket/config dirs (bare
+chrome-less pane, locked mode), so your personal zellij setup is never touched.
 The left sidebar lists open sessions; the **+** button (top-left) opens one in
 the default working directory set in the bar beside it — which defaults to `~`.
-Requires `ttyd` + `dtach` (`brew install ttyd dtach`) — the tab shows an install
-hint if they're missing.
+Requires `ttyd` + `zellij` (`brew install ttyd zellij`) — the tab shows an
+install hint if they're missing.
 
 Each tab carries a **live status dot** — pulsing amber while something is running
 (e.g. Claude working), red when it's waiting on you (a permission prompt), green

@@ -11,6 +11,9 @@
 
 const CWD_KEY = "weave.terminal-cwd";
 const COLLAPSED_KEY = "weave.terminal-sidebar-collapsed";
+const SIDEBAR_W_KEY = "weave.terminal-sidebar-width";
+const SIDEBAR_W_DEFAULT = 276; // px — matches the CSS fallback in main.terminal-page
+const SIDEBAR_W_MIN = 180; // px
 const SEARCH_TABS_KEY = "weave.search-tabs";
 const POLL_MS = 2500;
 const CLOSE_AT = 0.94; // close progress (0=top/open … 1=bottom/close) at/above which slide-to-close fires
@@ -26,7 +29,7 @@ const cwdInput = document.getElementById("term-cwd");
 const savedTag = document.getElementById("term-cwd-saved");
 const errEl = document.getElementById("term-bar-error");
 const collapseBtn = document.getElementById("term-collapse");
-const killBtn = document.getElementById("term-kill");
+const resizer = document.getElementById("term-resizer");
 const schemeSelect = document.getElementById("term-scheme");
 const tipsBtn = document.getElementById("term-tips");
 const tipsModal = document.getElementById("term-tips-modal");
@@ -48,7 +51,7 @@ let lastSessions = []; // most recent /api/terminals payload (drives the tab hov
 
 // ── search tabs ────────────────────────────────────────────────────────────────
 // Project-search tabs live alongside terminals in the same sidebar list, but are
-// purely client-side: each is an <iframe> to /search.html (no ttyd/tmux). They're
+// purely client-side: each is an <iframe> to /search.html (no ttyd/zellij). They're
 // pinned above the terminals and persisted so they survive a reload; the search
 // page itself remembers its last query per tab id.
 function loadSearchTabs() {
@@ -177,11 +180,10 @@ function ensureFrame(tab) {
     return f;
 }
 
-// Remember which tab was active so a reload can re-select it (see load()). This
-// also makes scrollback restore reliable: the reselected tab is un-hidden BEFORE
-// its iframe script runs, so it restores at its real size instead of the hidden
-// 80×24 (a later resize would pull the restored history back into the viewport,
-// where the shell's redraw clears it). Key mirrors WEAVE_TERM_SCHEME_KEY's style.
+// Remember which tab was active so a reload can re-select it (see load()): the
+// reselected tab is un-hidden BEFORE its iframe connects, so the handshake and
+// zellij's reattach replay happen at the pane's real size instead of the hidden
+// 80×24. Key mirrors WEAVE_TERM_SCHEME_KEY's style.
 const ACTIVE_TERM_KEY = "weave-active-term";
 
 function activate(id) {
@@ -623,8 +625,8 @@ async function load() {
     renderList(tabs);
     if (tabs.length && (!activeId || !frames.has(activeId))) {
         // Re-select the tab that was active before a reload (if it still exists),
-        // so it — the one the user is looking at — restores its scrollback at real
-        // size. Falls back to the first tab (e.g. first ever load, or it was closed).
+        // so it — the one the user is looking at — reattaches at its real size.
+        // Falls back to the first tab (e.g. first ever load, or it was closed).
         let want = null;
         try { want = localStorage.getItem(ACTIVE_TERM_KEY); } catch { /* unavailable */ }
         const pick = want && tabs.some((t) => t.id === want) ? want : tabs[0].id;
@@ -767,76 +769,6 @@ async function closeSession(id) {
     if (activeId === id) activeId = null;
     await load();
     if (!activeId && frames.size) activate(frames.keys().next().value);
-}
-
-// Kill switch (the repurposed redraw button). Opens an IN-PAGE confirm modal —
-// reusing the dashboard's own .modal component — rather than window.confirm(),
-// which browsers can silently suppress ("prevent additional dialogs", background
-// tabs) and can't style. On confirm: reap every weave terminal (each ttyd + its
-// dtach master) on the server, then reload to a clean, empty slate. Destructive
-// and irreversible: tears down every weave session (including any live claude
-// session in a tab), but touches only weave's own sessions.
-// (Per-session rendering self-heals on the next dashboard start — no manual
-// redraw/repair action anymore.)
-function killSwitch() {
-    if (document.getElementById("term-kill-modal")) return; // one at a time
-
-    const el = (tag, cls, text) => {
-        const n = document.createElement(tag);
-        if (cls) n.className = cls;
-        if (text != null) n.textContent = text;
-        return n;
-    };
-
-    const overlay = el("div", "modal");
-    overlay.id = "term-kill-modal";
-    const backdrop = el("div", "modal-backdrop");
-    const card = el("div", "modal-card");
-    card.setAttribute("role", "alertdialog");
-    card.setAttribute("aria-modal", "true");
-
-    const head = el("div", "modal-head");
-    head.appendChild(el("h3", null, "Kill all terminals?"));
-
-    const body = el("div", "modal-body");
-    body.appendChild(el("p", null,
-        "Every weave terminal — including any live claude session — is destroyed. " +
-        "This cannot be undone."));
-
-    const foot = el("div", "modal-foot");
-    const cancel = el("button", "btn btn--secondary", "Cancel");
-    const kill = el("button", "btn btn--danger", "Kill all");
-    cancel.type = "button";
-    kill.type = "button";
-    // Push the buttons to the right (an empty .status keeps .modal-foot's layout).
-    foot.appendChild(el("span", "status"));
-    foot.append(cancel, kill);
-
-    card.append(head, body, foot);
-    overlay.append(backdrop, card);
-    document.body.appendChild(overlay);
-    cancel.focus();
-
-    const close = () => {
-        document.removeEventListener("keydown", onKey);
-        overlay.remove();
-    };
-    function onKey(e) {
-        if (e.key === "Escape") { e.preventDefault(); close(); }
-    }
-    document.addEventListener("keydown", onKey);
-    backdrop.addEventListener("click", close);
-    cancel.addEventListener("click", close);
-    kill.addEventListener("click", async () => {
-        kill.disabled = true;
-        kill.textContent = "Killing…";
-        try {
-            await fetch("/api/terminals/kill-server", { method: "POST" });
-        } catch {
-            /* best-effort — reload anyway to resync the (now-empty) tab list */
-        }
-        location.reload();
-    });
 }
 
 // The fork glyph — a small git-branch icon, built with createElementNS to match
@@ -1094,6 +1026,104 @@ if (collapseBtn) {
     );
 }
 
+// ── draggable sidebar width ─────────────────────────────────────────────────
+// The .term-resizer handle on the sidebar/stage seam sets --term-sidebar-w
+// (an inline var on main) live as you drag; the value persists across reloads.
+// Pointer capture keeps mouse-moves flowing to the handle even while the cursor
+// is over the terminal <iframe> (which otherwise swallows them); the
+// .is-resizing class also drops the iframe's pointer-events as a belt-and-braces
+// fallback. Collapsed rail is a fixed width, so dragging is a no-op there.
+let sidebarWidth = SIDEBAR_W_DEFAULT;
+
+function sidebarMax() {
+    // Never let the sidebar crowd out the terminal past a usable minimum.
+    return Math.max(SIDEBAR_W_MIN, Math.min(680, window.innerWidth - 240));
+}
+
+function clampSidebarWidth(w) {
+    return Math.round(Math.max(SIDEBAR_W_MIN, Math.min(sidebarMax(), w)));
+}
+
+function applySidebarWidth(w) {
+    sidebarWidth = w;
+    mainEl.style.setProperty("--term-sidebar-w", `${w}px`);
+}
+
+function saveSidebarWidth(w) {
+    try {
+        localStorage.setItem(SIDEBAR_W_KEY, String(w));
+    } catch {
+        /* persistence best-effort */
+    }
+}
+
+try {
+    const saved = parseInt(localStorage.getItem(SIDEBAR_W_KEY) || "", 10);
+    if (Number.isFinite(saved)) applySidebarWidth(clampSidebarWidth(saved));
+} catch {
+    /* localStorage unavailable — keep the CSS default */
+}
+
+if (resizer) {
+    let dragging = false;
+
+    resizer.addEventListener("pointerdown", (e) => {
+        if (mainEl.classList.contains("sidebar-collapsed")) return;
+        dragging = true;
+        mainEl.classList.add("is-resizing");
+        try {
+            resizer.setPointerCapture(e.pointerId);
+        } catch {
+            /* capture unsupported — the .is-resizing fallback still works */
+        }
+        e.preventDefault();
+    });
+
+    resizer.addEventListener("pointermove", (e) => {
+        if (!dragging) return;
+        const left = mainEl.getBoundingClientRect().left;
+        applySidebarWidth(clampSidebarWidth(e.clientX - left));
+    });
+
+    const endDrag = (e) => {
+        if (!dragging) return;
+        dragging = false;
+        mainEl.classList.remove("is-resizing");
+        try {
+            resizer.releasePointerCapture(e.pointerId);
+        } catch {
+            /* ignore */
+        }
+        saveSidebarWidth(sidebarWidth);
+    };
+    resizer.addEventListener("pointerup", endDrag);
+    resizer.addEventListener("pointercancel", endDrag);
+
+    // Double-click restores the default width.
+    resizer.addEventListener("dblclick", () => {
+        applySidebarWidth(SIDEBAR_W_DEFAULT);
+        saveSidebarWidth(SIDEBAR_W_DEFAULT);
+    });
+
+    // Keyboard: arrow keys nudge the width when the handle is focused.
+    resizer.addEventListener("keydown", (e) => {
+        if (mainEl.classList.contains("sidebar-collapsed")) return;
+        let next = sidebarWidth;
+        if (e.key === "ArrowLeft") next -= 16;
+        else if (e.key === "ArrowRight") next += 16;
+        else return;
+        e.preventDefault();
+        applySidebarWidth(clampSidebarWidth(next));
+        saveSidebarWidth(sidebarWidth);
+    });
+
+    // Keep the width inside the max as the window shrinks.
+    window.addEventListener("resize", () => {
+        const clamped = clampSidebarWidth(sidebarWidth);
+        if (clamped !== sidebarWidth) applySidebarWidth(clamped);
+    });
+}
+
 // ── number-key tab switching ──────────────────────────────────────────────────
 // Press 1–9 (no modifier) to jump to the Nth tab in the sidebar, counted in the
 // order shown (search tabs first, then terminals). Only fires when focus is on
@@ -1146,7 +1176,10 @@ function wireSchemePicker() {
     const KEY = window.WEAVE_TERM_SCHEME_KEY;
 
     schemeSelect.replaceChildren();
-    for (const [id, { label }] of Object.entries(window.WEAVE_TERM_SCHEMES)) {
+    const entries = Object.entries(window.WEAVE_TERM_SCHEMES).sort((a, b) =>
+        a[1].label.localeCompare(b[1].label),
+    );
+    for (const [id, { label }] of entries) {
         const opt = document.createElement("option");
         opt.value = id;
         opt.textContent = label;
@@ -1173,7 +1206,6 @@ wireSchemePicker();
 
 newBtn.addEventListener("click", () => createSession(cwdInput.value.trim()));
 if (searchNewBtn) searchNewBtn.addEventListener("click", newSearchTab);
-if (killBtn) killBtn.addEventListener("click", killSwitch);
 
 // ── tips modals (vim + claude) ─────────────────────────────────────────────────
 function wireTipsModal(btn, modal) {

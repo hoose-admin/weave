@@ -1,6 +1,6 @@
 # weave-cmd-hook.sh — record the last command run in a weave terminal.
 #
-# Sourced ONCE at session start by lib/terminals.ts (injected via `dtach -p`). On each
+# Sourced ONCE at shell start via the per-session ZDOTDIR rc lib/terminals.ts generates. On each
 # command it writes the command line to $WEAVE_LIVE_DIR/$WEAVE_TERM_ID.cmd, which
 # the dashboard reads to label the terminal tab with the last command instead of
 # the directory. Inert (and returns cleanly) unless the weave env vars are set, so
