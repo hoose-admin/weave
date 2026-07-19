@@ -16,7 +16,7 @@
 }
 .top nav {
     display: flex;
-    gap: 2px;
+    gap: 20px;
     font-size: var(--font-size-md);
 }
 .top .top-actions {
@@ -81,13 +81,12 @@
     color: var(--muted);
     text-transform: lowercase;
     letter-spacing: 0.5px;
-    padding: 2px 8px;
-    border: 1px solid transparent;
-    border-radius: 4px;
+    padding-bottom: 2px;
 }
+/* Active tab: a single underline (not a boxed border) marks the current page. */
 .top nav a.active {
     color: var(--ink);
-    border-color: var(--ink);
+    border-bottom: 1px solid var(--ink);
 }
 .top nav a:hover {
     color: var(--ink);

@@ -235,28 +235,22 @@ main.terminal-page.sidebar-collapsed .term-collapse {
 main.terminal-page.sidebar-collapsed .term-collapse-icon {
     transform: rotate(180deg);
 }
-main.terminal-page.sidebar-collapsed .term-sidebar-head {
+/* Collapsed: the toolbar stacks to a thin vertical rail — the expand chevron on
+   top, then the search magnifier and the "+"; the utils dropdown + its caret are
+   dropped. Without this the toolbar stays a horizontal row at rail width and the
+   caret AND the search button overflow off-screen — you can collapse the panel
+   but there's nothing left to click to reopen it or to search. */
+main.terminal-page.sidebar-collapsed .term-toolbar {
+    flex-direction: column-reverse;
     justify-content: center;
+    gap: 6px;
+    padding: 8px 0 6px;
     border-bottom: 0;
-    padding: 8px 0 4px;
 }
-
-/* Collapsed control bar: drop the cwd form / labels, keep just a square "+". */
-main.terminal-page.sidebar-collapsed .term-bar {
-    padding: 4px 0 6px;
-    border-bottom: 0;
-    align-items: center;
-}
-main.terminal-page.sidebar-collapsed .term-cwd-form,
-main.terminal-page.sidebar-collapsed .term-cwd-saved,
-main.terminal-page.sidebar-collapsed .term-bar-row3,
-main.terminal-page.sidebar-collapsed .term-error,
+main.terminal-page.sidebar-collapsed .term-utils,
+main.terminal-page.sidebar-collapsed #term-utils-toggle,
 main.terminal-page.sidebar-collapsed .term-new-text {
     display: none;
-}
-main.terminal-page.sidebar-collapsed .term-bar-row2 {
-    width: 100%;
-    justify-content: center;
 }
 main.terminal-page.sidebar-collapsed #term-new {
     width: 36px;
